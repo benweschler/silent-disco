@@ -67,10 +67,15 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Discover the Silent Disco hub and measure traffic on your local Wi-Fi network.</string>
+	<string>Discover Silent Disco hubs, stream audio, and measure traffic over local Wi-Fi.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_silentdisco._tcp</string>
+		<string>_sdaudio._tcp</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
 	</array>
 </dict>
 </plist>

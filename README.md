@@ -1,16 +1,30 @@
 # Silent Disco Listener
 
-Flutter iOS diagnostics app for the offline-LAN experiment. Target test device:
-iPhone 14 Pro Max running iOS 18.6.2. No audio playback is implemented yet.
+Flutter iPhone listener for single-channel offline-LAN audio and the original synthetic diagnostics.
 
-Install a signed build, join the Mac-hosted Wi-Fi, then use **Find hubs / retry**
-and **Connect**. Run Connectivity (30 seconds) before the 10-minute baseline.
-Every profile is capped at 10 minutes. Keep the app visible during tests.
+Run `flutter run --release -d <iphone-device-id>` (use Release for physical tests). Start the Mac audio host, connect
+and tap Listen in this app, choose a test signal or local music file, then
+start a run. The native sender caps runs at ten minutes. No USB capture or DJ monitor yet.
 
-See [setup and rollback](docs/OFFLINE_LAN_SETUP.md),
-[protocol](docs/DIAGNOSTIC_PROTOCOL.md), and [validation](docs/VALIDATION.md).
-The setup guide describes commands run on the Mac server, not the phone.
+- [Audio setup and physical test checklist](docs/AUDIO_TESTING.md)
+- [Audio protocol and timing](docs/AUDIO_PROTOCOL.md)
+- [Original LAN setup and rollback](docs/OFFLINE_LAN_SETUP.md)
+- [Validation record](docs/VALIDATION.md)
 
-`flutter test` covers UI interactions. `swift test` on macOS tests the matching
-native protocol/engine independently of Flutter. Native diagnostics sources and
-fixtures are mirrored in the server repository; keep changes synchronized.
+Audio and LAN diagnostics are separate, mutually exclusive modes. Both projects contain
+identical native audio/diagnostics cores and a pinned offline-buildable Opus package.
+Builds never depend on the sibling checkout.
+
+```sh
+flutter analyze
+flutter test
+swift test
+swift test --package-path NativeAudio
+SD_AUDIO_NETWORK_TEST=1 swift test --package-path NativeAudio
+python3 scripts/verify_opus.py
+python3 scripts/check_mirrors.py
+```
+
+The last check requires the other checkout. Audio socket integration is opt-in and runs
+in seconds. Signed iPhone installation, locked-screen Bluetooth playback, and acoustic
+synchronization require physical testing; builds and simulated listeners do not prove them.

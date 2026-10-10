@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'diagnostics.dart';
+import 'audio.dart';
 
 void main() => runApp(const MyApp());
 
@@ -13,6 +13,6 @@ class MyApp extends StatelessWidget {
       colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff5743c6)),
       useMaterial3: true,
     ),
-    home: const DiagnosticsScreen(isHost: false),
+    home: const AudioScreen(isHost: false),
   );
 }

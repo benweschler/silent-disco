@@ -9,6 +9,11 @@ import Foundation
 #endif
 
 final class DiagnosticBridge: NSObject, FlutterStreamHandler {
+  private var enabled = true
+  func setEnabled(_ value: Bool) {
+    enabled = value
+    if !value { engine.perform("disconnect"); engine.perform("stopHost"); engine.perform("stopBrowse") }
+  }
   private let engine: DiagnosticEngine
   private let methods: FlutterMethodChannel
   private let events: FlutterEventChannel
@@ -41,7 +46,7 @@ final class DiagnosticBridge: NSObject, FlutterStreamHandler {
       observers.append(
         NotificationCenter.default.addObserver(
           forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.engine.perform("foreground") })
+        ) { [weak self] _ in if self?.enabled == true { self?.engine.perform("foreground") } })
     #endif
     engine.onSnapshot = { [weak self] snapshot in
       DispatchQueue.main.async {
@@ -81,6 +86,9 @@ final class DiagnosticBridge: NSObject, FlutterStreamHandler {
         guard commands.contains(call.method) else {
           result(FlutterMethodNotImplemented)
           return
+        }
+        guard self.enabled || call.method == "snapshot" else {
+          result(FlutterError(code: "inactive", message: "Select diagnostics mode first", details: nil)); return
         }
         self.engine.perform(call.method, args: call.arguments as? [String: Any] ?? [:])
         result(nil)

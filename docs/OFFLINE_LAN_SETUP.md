@@ -47,6 +47,11 @@ sudo networksetup -setmanual "Silent Disco Offline" 10.10.10.1 255.255.255.255
 networksetup -getinfo "Silent Disco Offline"
 ```
 
+After configuration, check `ifconfig lo0` still includes `127.0.0.1`. On this Mac,
+the dummy service displaced that standard loopback address. If absent, restore it
+alongside the dummy address using `sudo ifconfig lo0 inet 127.0.0.1 netmask 255.0.0.0 alias`.
+This repair does not remove 10.10.10.1; verify again after reboot. See AUDIO_TESTING.md.
+
 Confirm the new service exists and has the intended address. A failure is a real
 setup failure: do not suppress it, run downloaded scripts, or alter unrelated
 loopback configuration to force this experiment to work.
