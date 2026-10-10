@@ -1,17 +1,16 @@
-# silent_disco
+# Silent Disco Listener
 
-Join a silent discos with up to three channels!
+Flutter iOS diagnostics app for the offline-LAN experiment. Target test device:
+iPhone 14 Pro Max running iOS 18.6.2. No audio playback is implemented yet.
 
-## Getting Started
+Install a signed build, join the Mac-hosted Wi-Fi, then use **Find hubs / retry**
+and **Connect**. Run Connectivity (30 seconds) before the 10-minute baseline.
+Every profile is capped at 10 minutes. Keep the app visible during tests.
 
-This project is a starting point for a Flutter application.
+See [setup and rollback](docs/OFFLINE_LAN_SETUP.md),
+[protocol](docs/DIAGNOSTIC_PROTOCOL.md), and [validation](docs/VALIDATION.md).
+The setup guide describes commands run on the Mac server, not the phone.
 
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+`flutter test` covers UI interactions. `swift test` on macOS tests the matching
+native protocol/engine independently of Flutter. Native diagnostics sources and
+fixtures are mirrored in the server repository; keep changes synchronized.
