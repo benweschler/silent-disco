@@ -39,6 +39,17 @@ optional; follow OFFLINE_LAN_SETUP.md only when retiring the setup.
 The LAN diagnostics button stops audio and opens the original foreground-only test screen.
 Returning stops diagnostics before returning to audio. Reconnect/restart explicitly.
 
+## Host startup / Bonjour failures
+
+If Bonjour registration fails (including macOS `DNS Error: NoAuth`), the host
+shows the error and retries once without advertising. Use the iPhone's manual
+address connection with the Mac's LAN IP and the displayed TCP port. The port
+can change after every restart. Local-network access rules still apply.
+The socket fallback does not repair Bonjour authorization. If permission is
+already enabled, quit and reopen the Mac app before retrying discovery.
+Other listener failures stop hosting and retain the error in the UI and system log.
+No dummy-service removal or loopback change is required for this error.
+
 ## Short recovery checks
 
 - Disconnect headphones: listening stops instead of falling back unexpectedly to speaker.

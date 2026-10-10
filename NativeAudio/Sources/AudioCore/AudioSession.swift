@@ -161,7 +161,13 @@ public final class AudioSession {
   private var errorText = ""
   private var renderAllowed = true
   private var clientStop: DispatchWorkItem?
-  public init(isHost: Bool) {
+  private let startListener: (NWListener, DispatchQueue) -> Void
+  public convenience init(isHost: Bool) {
+    self.init(isHost: isHost, startListener: { $0.start(queue: $1) })
+  }
+  // Injectable listener startup allows deterministic asynchronous failure tests.
+  init(isHost: Bool, startListener: @escaping (NWListener, DispatchQueue) -> Void) {
+    self.startListener = startListener
     self.isHost = isHost
     #if os(iOS)
       renderAllowed = false
@@ -215,7 +221,12 @@ public final class AudioSession {
         send(["type": "audibleIssue"], to: p)
         log("Audible interruption marked by listener")
       }
-    case "startHost": if isHost { try startHost() }
+    case "startHost":
+      if isHost {
+        do { try startHost() } catch {
+          hostFailed("Audio host failed to start: \(error.localizedDescription)")
+        }
+      }
     case "stopHost", "sleep": shutdown(reason: command == "sleep" ? "Mac sleeping" : "Host stopped")
     case "browse":
       reconnect = true
@@ -349,9 +360,9 @@ public final class AudioSession {
     default: throw AudioFailure("Unknown audio command")
     }
   }
-  private func startHost() throws {
+  private func startHost(advertise: Bool = true) throws {
     guard listener == nil else { return }
-    errorText = ""
+    if advertise { errorText = "" }
     status = "starting"
     let u = try NWListener(using: parameters(false), on: .any)
     let t = try NWListener(using: parameters(true), on: .any)
@@ -360,10 +371,13 @@ public final class AudioSession {
     u.newConnectionHandler = { [weak self] c in self?.acceptUDP(c) }
     u.stateUpdateHandler = { [weak self, weak u] state in
       guard let self = self, self.udpListener === u else { return }
-      if case .failed(let e) = state { self.shutdown(reason: "UDP listener failed: \(e)") }
+      if case .failed(let e) = state { self.hostFailed("UDP listener failed: \(e)") }
     }
-    t.service = NWListener.Service(
-      name: "Silent Disco Audio", type: AudioWire.service, txtRecord: NWTXTRecord(["version": "1"]))
+    if advertise {
+      t.service = NWListener.Service(
+        name: "Silent Disco Audio", type: AudioWire.service,
+        txtRecord: NWTXTRecord(["version": "1"]))
+    }
     t.newConnectionHandler = { [weak self] c in
       guard let self = self else {
         c.cancel()
@@ -384,11 +398,35 @@ public final class AudioSession {
         self.status = "hosting"
         self.publish()
       }
-      if case .failed(let e) = state { self.shutdown(reason: "TCP listener failed: \(e)") }
+      if case .failed(let e) = state {
+        if advertise, case .dns = e {
+          // Bonjour failure also kills its TCP listener. Recreate the transport once,
+          // without advertising, so manual-address connections remain available.
+          self.hostFailed(
+            "Bonjour discovery unavailable: \(e). Retrying without discovery. Connect from iPhone using the Mac's LAN address and displayed TCP port. Check Local Network permission; if already enabled, quit and reopen the Mac app."
+          )
+          do { try self.startHost(advertise: false) } catch {
+            self.hostFailed("Audio host retry failed: \(error.localizedDescription)")
+          }
+        } else {
+          self.hostFailed("TCP listener failed: \(e)")
+        }
+      }
+      if case .waiting(let e) = state {
+        self.errorText = "Audio host waiting: \(e)"
+        self.publish()
+      }
     }
-    u.start(queue: queue)
-    t.start(queue: queue)
+    startListener(u, queue)
+    startListener(t, queue)
     ensureTicker()
+  }
+  private func hostFailed(_ message: String) {
+    errorText = message
+    log(message)
+    NSLog("Silent Disco Audio: %@", message)
+    shutdown(reason: message)
+    publish()
   }
   private func browse() {
     guard !isHost else { return }

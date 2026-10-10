@@ -178,11 +178,88 @@ final class AudioCoreTests: XCTestCase {
     check("deactivate", wants: false)
     phone.onSnapshot = nil
   }
+  func testHostBonjourFailureFallsBackAndIgnoresStaleCallbacks() {
+    let ready = expectation(description: "manual host survives stale listener failure")
+    var starts = 0
+    var originalTCP: NWListener?
+    let host = AudioSession(
+      isHost: true,
+      startListener: { listener, queue in
+        starts += 1
+        let attempt = starts
+        queue.async {
+          if attempt == 2 {
+            originalTCP = listener
+            listener.stateUpdateHandler?(.failed(.dns(-65555)))
+          } else {
+            if attempt == 4 {
+              XCTAssertNil(listener.service)
+              originalTCP?.stateUpdateHandler?(.failed(.dns(-65555)))
+            }
+            listener.stateUpdateHandler?(.ready)
+          }
+        }
+      })
+    host.onSnapshot = { snapshot in
+      if snapshot["status"] as? String == "hosting" {
+        XCTAssertEqual(starts, 4)
+        XCTAssertEqual(snapshot["hosting"] as? Bool, true)
+        XCTAssertTrue(
+          (snapshot["error"] as? String ?? "").contains("Bonjour discovery unavailable"))
+        XCTAssertFalse((snapshot["events"] as? [[String: Any]] ?? []).isEmpty)
+        ready.fulfill()
+      }
+    }
+    host.perform("startHost")
+    wait(for: [ready], timeout: 2)
+    host.perform("stopHost")
+  }
+
+  func testHostTransportFailureIsVisibleWithoutRetryLoop() {
+    let failed = expectation(description: "transport failure published")
+    var starts = 0
+    let host = AudioSession(
+      isHost: true,
+      startListener: { listener, queue in
+        starts += 1
+        let attempt = starts
+        queue.async {
+          if attempt == 2 { listener.stateUpdateHandler?(.failed(.posix(.EACCES))) }
+        }
+      })
+    host.onSnapshot = { snapshot in
+      if snapshot["hosting"] as? Bool == false,
+        (snapshot["error"] as? String ?? "").contains("TCP listener failed")
+      {
+        XCTAssertEqual(starts, 2)
+        XCTAssertEqual(snapshot["status"] as? String, "idle")
+        failed.fulfill()
+      }
+    }
+    host.perform("startHost")
+    wait(for: [failed], timeout: 2)
+    host.perform("deactivate")
+  }
+
   func testTwoClientsLateJoinAndFailureIsolation() throws {
+    try exerciseTwoClients(forceBonjourFailure: false)
+  }
+  func testManualHostAfterBonjourFailureDeliversToTwoClients() throws {
+    try exerciseTwoClients(forceBonjourFailure: true)
+  }
+  private func exerciseTwoClients(forceBonjourFailure: Bool) throws {
     guard ProcessInfo.processInfo.environment["SD_AUDIO_NETWORK_TEST"] == "1" else {
       throw XCTSkip("Set SD_AUDIO_NETWORK_TEST=1 for real sockets")
     }
-    let host = AudioSession(isHost: true)
+    let host = AudioSession(
+      isHost: true,
+      startListener: { listener, queue in
+        if forceBonjourFailure, listener.service != nil {
+          queue.async { listener.stateUpdateHandler?(.failed(.dns(-65555))) }
+        } else {
+          listener.start(queue: queue)
+        }
+      })
     let listening = expectation(description: "host ready")
     let lock = NSLock()
     var port = 0
