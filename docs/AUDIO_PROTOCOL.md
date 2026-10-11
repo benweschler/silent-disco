@@ -90,3 +90,9 @@ packets are unchanged. See AUDIO_TESTING.md for diagnostic field interpretation.
 Timing diagnostics additionally distinguish full `pipelineLatencyMs` from hardware
 `outputLatencyMs`, preserve hardware-only versus corrected timing errors, and record
 sustained-error candidate transitions. These are additive schema-2/protocol-1 fields.
+
+On foreground return the listener replaces a connection with more than five seconds
+of receive silence and bypasses reconnect backoff for that attempt. Host selection
+and listening intent persist; explicit Disconnect/Stop listening take precedence.
+Idle background execution is not guaranteed and the host heartbeat timeout remains
+five seconds. No additional wire messages or protocol version changes are required.

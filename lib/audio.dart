@@ -330,6 +330,10 @@ class _AudioScreenState extends State<AudioScreen> {
                   stats['state'] ??
                       (listening ? 'Waiting for host / clock' : 'Stopped'),
                 ),
+                if (listening && !active)
+                  const Text(
+                    'Waiting for the host. Keep this app open until audio starts; reopen it to reconnect if it was backgrounded.',
+                  ),
                 _row('Buffered audio', '${stats['bufferMs'] ?? 0} ms'),
                 _row(
                   'Clock',

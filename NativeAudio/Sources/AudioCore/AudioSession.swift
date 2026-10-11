@@ -11,8 +11,8 @@ private final class AudioPeer {
   var hello = false
   var ready = false
   var wants = false
-  var lastHeard = AudioWire.now()
-  let created = AudioWire.now()
+  var lastHeard: Double
+  let created: Double
   var pendingTCP = 0
   var pendingUDP = 0
   var submitted = 0
@@ -21,8 +21,10 @@ private final class AudioPeer {
   var stats = [String: Any]()
   var final = false
   var diagnosticHistory = ReceivedAudioDiagnostics()
-  init(_ tcp: NWConnection) {
+  init(_ tcp: NWConnection, now: Double = AudioWire.now()) {
     self.tcp = tcp
+    self.lastHeard = now
+    self.created = now
     var uuid = UUID().uuid
     token = withUnsafeBytes(of: &uuid) { Data($0) }
   }
@@ -166,12 +168,23 @@ public final class AudioSession {
   private var renderAllowed = true
   private var clientStop: DispatchWorkItem?
   private let startListener: (NWListener, DispatchQueue) -> Void
+  private let startConnection: (NWConnection, DispatchQueue) -> Void
+  private let browsingEnabled: Bool
+  private let now: () -> Double
+  private let runPeriodicTicks: Bool
   public convenience init(isHost: Bool) {
     self.init(isHost: isHost, startListener: { $0.start(queue: $1) })
   }
-  // Injectable listener startup allows deterministic asynchronous failure tests.
-  init(isHost: Bool, startListener: @escaping (NWListener, DispatchQueue) -> Void) {
+  // Injectable transport startup and time support deterministic lifecycle tests without sockets.
+  init(isHost: Bool, startListener: @escaping (NWListener, DispatchQueue) -> Void,
+    startConnection: @escaping (NWConnection, DispatchQueue) -> Void = { $0.start(queue: $1) },
+    browsingEnabled: Bool = true,
+    now: @escaping () -> Double = { AudioWire.now() }, runPeriodicTicks: Bool = true) {
     self.startListener = startListener
+    self.startConnection = startConnection
+    self.browsingEnabled = browsingEnabled
+    self.now = now
+    self.runPeriodicTicks = runPeriodicTicks
     self.isHost = isHost
     #if os(iOS)
       renderAllowed = false
@@ -366,9 +379,14 @@ public final class AudioSession {
       maybeRender()
     case "foreground":
       if !isHost {
+        // Suspension can leave an apparently connected socket whose peer already timed out.
+        if reconnect, let client = client, now() - client.lastHeard > 5 {
+          disconnectClient("Connection stale after background suspension")
+        }
         browse()
         if client == nil && reconnect {
           retryAt = 0
+          if wants { onListening?(true) }
           connect()
         }
       }
@@ -453,7 +471,7 @@ public final class AudioSession {
     publish()
   }
   private func browse() {
-    guard !isHost else { return }
+    guard !isHost, browsingEnabled else { return }
     browser?.cancel()
     let b = NWBrowser(for: .bonjour(type: AudioWire.service, domain: nil), using: parameters(true))
     browser = b
@@ -484,7 +502,7 @@ public final class AudioSession {
   private func connect() {
     guard !isHost, client == nil, let endpoint = selected else { return }
     status = "connecting"
-    let p = AudioPeer(NWConnection(to: endpoint, using: parameters(true)))
+    let p = AudioPeer(NWConnection(to: endpoint, using: parameters(true)), now: now())
     client = p
     attach(p)
   }
@@ -504,7 +522,7 @@ public final class AudioSession {
       default: break
       }
     }
-    p.tcp.start(queue: queue)
+    startConnection(p.tcp, queue)
   }
   private func receiveTCP(_ p: AudioPeer) {
     p.tcp.receive(minimumIncompleteLength: 1, maximumLength: 16384) {
@@ -1003,7 +1021,7 @@ public final class AudioSession {
     return s
   }
   private func ensureTicker() {
-    guard ticker == nil else { return }
+    guard runPeriodicTicks, ticker == nil else { return }
     let t = DispatchSource.makeTimerSource(queue: queue)
     t.schedule(deadline: .now(), repeating: .milliseconds(100), leeway: .milliseconds(10))
     t.setEventHandler { [weak self] in self?.tick() }
@@ -1011,7 +1029,7 @@ public final class AudioSession {
     t.resume()
   }
   private func tick() {
-    let now = AudioWire.now()
+    let now = now()
     if !isHost, clock.ready, now - lastClockGood > 10 {
       clock = ClockEstimate()
       stopRenderer(deactivate: false)
@@ -1050,7 +1068,12 @@ public final class AudioSession {
     events.append(["at": ISO8601DateFormatter().string(from: Date()), "message": message])
     if events.count > 100 { events.removeFirst() }
   }
-  private func publish() {
+  // Queue barrier used by deterministic native tests; no transport or timer work.
+  func inspectSnapshot(_ completion: @escaping ([String: Any]) -> Void) {
+    queue.async { completion(self.snapshotValue()) }
+  }
+  private func publish() { onSnapshot?(snapshotValue()) }
+  private func snapshotValue() -> [String: Any] {
     var s: [String: Any] = [
       "status": status, "hosting": listener != nil, "active": active, "draining": draining,
       "listening": wants,
@@ -1066,7 +1089,7 @@ public final class AudioSession {
       "recoveryHint": "After a prolonged background outage, reopen the app to reconnect.",
     ]
     if let report = latestReport { s["report"] = report }
-    onSnapshot?(s)
+    return s
   }
   deinit {
     ticker?.cancel()

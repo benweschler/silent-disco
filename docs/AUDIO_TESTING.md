@@ -159,3 +159,19 @@ interruptions and stop audio to save the report. Repeat once through the speaker
 only if needed. Physical success requires no lock-triggered interruption or reset
 loop; these code changes alone do not establish that result. If errors persist,
 inspect the report rather than increasing thresholds or declaring success.
+
+## Idle listener background recovery
+
+Before music starts, keep the iPhone app open. iOS may suspend an idle backgrounded
+app, preventing heartbeats; the Mac still removes listeners after five seconds of
+silence. Reopening checks freshness immediately and replaces a stale connection
+without waiting for reconnect backoff. The selected host and listening intent are
+preserved, and clock synchronization restarts before joining the current stream.
+Explicit Disconnect or Stop listening continues to override automatic listening.
+No waiting audio or indefinite idle-background connection is introduced.
+
+Device check: connect and tap Listen, background before audio starts, wait long
+enough for the Mac to remove the idle listener, then start music on the Mac.
+Reopen the phone: it should reconnect and play without another Listen tap. Repeat
+with Stop listening or Disconnect selected first; audio must not start itself.
+A manual endpoint still requires a new port if the host itself was restarted.
