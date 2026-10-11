@@ -133,3 +133,29 @@ with adequate playable audio suggest clock/player/latency calculation issues.
 Do not change scheduling horizon, reset threshold or codec until the evidence
 supports that change. No full-app or repeated socket tests are needed for this
 instrumentation; physical lock/background behavior is validated by the user.
+
+## Lock-related timing correction
+
+Scheduling and timing checks now use the player's full downstream pipeline latency
+(`player.outputPresentationLatency`), not hardware latency alone. The fixed Mac
+presentation anchor is retained. `outputLatencyMs` still means hardware latency;
+`pipelineLatencyMs` and `pipelineLatencyChangeMs` describe the full pipeline.
+Do not add Bluetooth or I/O-buffer latency again. Diagnostics also include
+`hardwareOnlyTimingErrorMs`, corrected `timingErrorMs`, timestamp validity and sample
+rate, and iOS `ioBufferDurationMs`. Unavailable/non-finite observations serialize as
+null and cannot drive rate correction or a timing reset.
+
+A timing error must exceed 50 ms with the same sign for 200 ms of valid observations
+to trigger a reset. Recovery within threshold, a sign change, invalid timing, or
+an observation gap above 100 ms restarts confirmation. `timingCandidateStarted`,
+`timingCandidateRecovered`, `timingCandidateInvalidated`, `timingCandidateReplaced`
+and `timingCandidateSustained` record transitions. While a large error awaits
+confirmation playback rate is 1.0. Underruns and missing-audio recovery remain
+immediate; the 100 ms decoded horizon, codec and lead choices are unchanged.
+
+After updating both apps, play the same music at 500 ms for 30 seconds in the
+foreground, then perform three lock/wake cycles through AirPods. Note audible
+interruptions and stop audio to save the report. Repeat once through the speaker
+only if needed. Physical success requires no lock-triggered interruption or reset
+loop; these code changes alone do not establish that result. If errors persist,
+inspect the report rather than increasing thresholds or declaring success.

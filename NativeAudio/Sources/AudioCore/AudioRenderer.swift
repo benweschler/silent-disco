@@ -24,7 +24,7 @@ public final class AudioRenderer {
   private var consecutive = 0
   private var underruns = 0
   private var rebuffer = 0
-  private var errorMs = 0.0
+  private var errorMs: Double?
   private var playing = false
   private var configured = false
   private var active = false
@@ -36,12 +36,33 @@ public final class AudioRenderer {
   private var measurements = RenderMeasurements()
   private var offsetAdjustment = 0.0
   private var initialLatency = 0.0
+  private var initialPipelineLatency = 0.0
+  private var timingDecision = SustainedTimingError()
+  private var latestTiming: PlaybackTiming?
+  private var passLatency: PlaybackLatency?
   public var onDiagnostic: ((UInt64, Double, String, [String: Any]) -> Void)?
   public var onStats: (([String: Any]) -> Void)?
   public var onEvent: ((String) -> Void)?
   public var onError: ((String) -> Void)?
   public init() {}
-  private var latency: Double { max(0, engine.outputNode.presentationLatency) }
+  private func readLatency() -> PlaybackLatency {
+    #if os(iOS)
+      let ioBuffer: Double? = AVAudioSession.sharedInstance().ioBufferDuration
+    #else
+      let ioBuffer: Double? = nil
+    #endif
+    return PlaybackLatency(hardware: engine.outputNode.presentationLatency,
+      pipeline: player.outputPresentationLatency, ioBuffer: ioBuffer)
+  }
+  private func readTiming(_ latency: PlaybackLatency) -> PlaybackTiming {
+    let node = player.lastRenderTime
+    let position = node.flatMap { player.playerTime(forNodeTime: $0) }
+    return PlaybackTiming(
+      nodeHost: node.flatMap { $0.isHostTimeValid ? AVAudioTime.seconds(forHostTime: $0.hostTime) : nil },
+      sampleTime: position.flatMap { $0.isSampleTimeValid ? $0.sampleTime : nil },
+      sampleRate: position?.sampleRate ?? 0, offset: offset,
+      presentationAnchor: anchorPresentation, latency: latency)
+  }
   public func start(generation: UInt64, offset: Double) {
     queue.async {
       do {
@@ -77,7 +98,12 @@ public final class AudioRenderer {
         self.engine.connect(self.speed, to: self.engine.mainMixerNode, format: self.format)
         self.engine.prepare()
         try self.engine.start()
-        self.initialLatency = self.latency
+        let latency = self.readLatency()
+        self.initialLatency = latency.hardware
+        self.initialPipelineLatency = latency.pipeline
+        self.timingDecision.clear()
+        self.latestTiming = nil
+        self.errorMs = nil
         self.measurements.resetBoundary()
         self.configured = true
         self.active = true
@@ -112,8 +138,10 @@ public final class AudioRenderer {
     queue.async {
       guard self.active, packet.generation == self.generation else { return }
       self.measurements.packetQueue(AudioWire.now() - enqueued)
+      let latency = self.readLatency()
+      guard latency.valid else { return }
       self.jitter.insert(
-        packet, hostNow: AudioWire.now() + self.offset, outputLead: self.latency + 0.015)
+        packet, hostNow: AudioWire.now() + self.offset, outputLead: latency.pipeline + 0.015)
     }
   }
   public func stop(completion: (() -> Void)? = nil) {
@@ -127,6 +155,9 @@ public final class AudioRenderer {
     if active && configured { captureReset("Renderer stopped or restarted") }
     timer?.cancel()
     timer = nil
+    timingDecision.clear()
+    latestTiming = nil
+    errorMs = nil
     player.stop()
     engine.stop()
     active = false
@@ -140,6 +171,7 @@ public final class AudioRenderer {
     timing: [String: Any] = [:]) {
     if fadeUntil == nil {
       captureReset(reason, timing: timing)
+      timingDecision.clear()
       fadeUntil = AudioWire.now() + 0.020
       onEvent?(reason)
     }
@@ -148,38 +180,34 @@ public final class AudioRenderer {
     let now = AudioWire.now()
     var fields = measurements.json
     fields["reason"] = reason
-    fields["timingErrorMs"] = NSNull()
-    fields["expectedElapsedSeconds"] = NSNull()
-    fields["playerSampleTime"] = NSNull()
-    fields["estimatedPlayableAudioMs"] = NSNull()
-    if playing, let time = player.lastRenderTime,
-      let ptime = player.playerTime(forNodeTime: time), ptime.isSampleTimeValid,
-      time.isHostTimeValid {
-      let elapsed = AVAudioTime.seconds(forHostTime: time.hostTime)
-        - (anchorPresentation - offset - latency)
-      fields["expectedElapsedSeconds"] = elapsed
-      fields["playerSampleTime"] = ptime.sampleTime
-      fields["playerSampleRate"] = ptime.sampleRate
-      fields["timingErrorMs"] = (elapsed - Double(ptime.sampleTime) / ptime.sampleRate) * 1000
-      fields["estimatedPlayableAudioMs"] = RenderMeasurements.playableMs(
-        scheduled: scheduled, sampleTime: ptime.sampleTime, sampleRate: ptime.sampleRate,
-        rate: Double(speed.rate)) as Any? ?? NSNull()
+    let latency = passLatency ?? readLatency()
+    if playing {
+      fields.merge(readTiming(latency).json(scheduled: scheduled, rate: Double(speed.rate))) { _, new in new }
+    } else {
+      fields.merge(PlaybackTiming(nodeHost: nil, sampleTime: nil, sampleRate: 0,
+        offset: offset, presentationAnchor: anchorPresentation, latency: latency)
+        .json(scheduled: scheduled, rate: Double(speed.rate))) { _, new in new }
     }
     fields["playbackRate"] = speed.rate
     fields["clockOffsetMs"] = offset * 1000
     fields["clockOffsetAdjustmentMs"] = offsetAdjustment * 1000
-    fields["outputLatencyMs"] = latency * 1000
-    fields["outputLatencyChangeMs"] = (latency - initialLatency) * 1000
+    fields["outputLatencyChangeMs"] = latency.hardware.isFinite && initialLatency.isFinite
+      ? (latency.hardware - initialLatency) * 1000 as Any : NSNull()
+    fields["pipelineLatencyChangeMs"] = latency.valid && initialPipelineLatency.isFinite
+      ? (latency.pipeline - initialPipelineLatency) * 1000 as Any : NSNull()
     fields["compressedBufferMs"] = jitter.packets.count * 20
     fields["scheduledSamples"] = scheduled
-    fields["nextRenderingDeadlineMs"] = playing
-      ? (nextPresentation - offset - latency - now) * 1000 as Any : NSNull()
+    fields["nextRenderingDeadlineMs"] = playing && latency.valid
+      ? (nextPresentation - offset - latency.pipeline - now) * 1000 as Any : NSNull()
     // Preserve the exact sample pair that triggered a timing/underrun decision.
     fields.merge(timing) { _, captured in captured }
     onDiagnostic?(generation, now, ISO8601DateFormatter().string(from: Date()), fields)
   }
   private func resetPlayback() {
     measurements.resetBoundary()
+    timingDecision.clear()
+    latestTiming = nil
+    errorMs = nil
     fadeUntil = nil
     player.stop()
     engine.mainMixerNode.outputVolume = 1
@@ -197,7 +225,19 @@ public final class AudioRenderer {
     let now = AudioWire.now()
     measurements.tick(now)
     defer { measurements.pass(AudioWire.now() - now) }
+    let context = readLatency()
+    passLatency = context
+    defer { passLatency = nil }
     let hostNow = now + offset
+    guard context.valid else {
+      let decision = timingDecision.observe(error: nil, at: now)
+      errorMs = nil
+      latestTiming = nil
+      if let transition = decision.transition { timingEvent(transition, timing: readTiming(context)) }
+      reportIfDue(now)
+      return
+    }
+    let latency = context.pipeline
     if let deadline = fadeUntil {
       engine.mainMixerNode.outputVolume = Float(max(0, min(1, (deadline - now) / 0.020)))
       if now >= deadline { resetPlayback() }
@@ -228,35 +268,27 @@ public final class AudioRenderer {
       reportIfDue(now)
       return
     }
-    if let time = player.lastRenderTime, let ptime = player.playerTime(forNodeTime: time),
-      ptime.isSampleTimeValid, time.isHostTimeValid
-    {
-      let elapsed =
-        AVAudioTime.seconds(forHostTime: time.hostTime) - (anchorPresentation - offset - latency)
-      if elapsed > 0.1 {
-        let actual = Double(ptime.sampleTime) / ptime.sampleRate
-        let error = elapsed - actual
-        errorMs = error * 1000
-        func capturedTiming() -> [String: Any] {
-          ["timingErrorMs": errorMs, "expectedElapsedSeconds": elapsed,
-           "playerSampleTime": ptime.sampleTime, "playerSampleRate": ptime.sampleRate,
-           "estimatedPlayableAudioMs": RenderMeasurements.playableMs(
-             scheduled: scheduled, sampleTime: ptime.sampleTime, sampleRate: ptime.sampleRate,
-             rate: Double(speed.rate)) as Any? ?? NSNull()]
-        }
-        if PlaybackPolicy.mustResync(error: error) {
-          resync("Clock/render timing error exceeded 50 ms", timing: capturedTiming())
-          reportIfDue(now)
-          return
-        }
-        speed.rate = PlaybackPolicy.rate(error: error)
-        if actual > Double(scheduled) / 48000 + 0.020 {
-          underruns += 1
-          resync("Render underrun", timing: capturedTiming())
-          reportIfDue(now)
-          return
-        }
-      }
+    let timing = readTiming(context)
+    latestTiming = timing
+    errorMs = timing.error.map { $0 * 1000 }
+    // Starvation is independent of timestamp-error confirmation.
+    if timing.hasUnderrun(scheduled: scheduled) {
+      underruns += 1
+      resync("Render underrun", timing: timing.json(scheduled: scheduled, rate: Double(speed.rate)))
+      reportIfDue(now)
+      return
+    }
+    let error = timing.elapsed.map { $0 > 0.1 } == true ? timing.error : nil
+    let decision = timingDecision.observe(error: error, at: now)
+    if let transition = decision.transition { timingEvent(transition, timing: timing) }
+    if decision.reset {
+      resync("Sustained clock/render timing error exceeded 50 ms",
+        timing: timing.json(scheduled: scheduled, rate: Double(speed.rate)))
+      reportIfDue(now)
+      return
+    }
+    if let error = error {
+      speed.rate = abs(error) > 0.050 ? 1 : PlaybackPolicy.rate(error: error)
     }
     // Schedule only a short PCM horizon. The larger lead stays encoded in the jitter buffer.
     var count = 0
@@ -317,17 +349,30 @@ public final class AudioRenderer {
       emit()
     }
   }
+  private func timingEvent(_ kind: String, timing: PlaybackTiming) {
+    var fields = timing.json(scheduled: scheduled, rate: Double(speed.rate))
+    fields["diagnosticKind"] = kind
+    fields["clockOffsetMs"] = offset * 1000
+    onDiagnostic?(generation, AudioWire.now(), ISO8601DateFormatter().string(from: Date()), fields)
+  }
   private func emit() {
+    var diagnostics = measurements.json
+    if let timing = latestTiming {
+      diagnostics.merge(timing.json(scheduled: scheduled, rate: Double(speed.rate))) { _, new in new }
+    }
+    let latency = passLatency ?? readLatency()
     onStats?([
-      "rendererDiagnostics": measurements.json,
+      "rendererDiagnostics": diagnostics,
       "generation": String(generation),
       "state": !active ? "stopped" : playing ? "playing" : "buffering",
       "bufferMs": Double(jitter.packets.count) * 20, "latePackets": retiredLate + jitter.late,
       "duplicates": retiredDuplicates + jitter.duplicates,
       "rejectedPackets": retiredRejected + jitter.rejected, "missingAtDeadline": losses,
       "concealedFrames": concealed,
-      "underruns": underruns, "rebufferEvents": rebuffer, "timingErrorMs": errorMs,
-      "rate": speed.rate, "outputLatencyMs": latency * 1000,
+      "underruns": underruns, "rebufferEvents": rebuffer, "timingErrorMs": errorMs as Any? ?? NSNull(),
+      "rate": speed.rate,
+      "outputLatencyMs": latency.hardware.isFinite ? latency.hardware * 1000 as Any : NSNull(),
+      "pipelineLatencyMs": latency.valid ? latency.pipeline * 1000 as Any : NSNull(),
     ])
   }
   deinit { timer?.cancel() }

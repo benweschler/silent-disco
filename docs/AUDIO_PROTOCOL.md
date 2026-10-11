@@ -86,3 +86,7 @@ Evidence is bounded and trimmed before serialization to the existing 16 KB frame
 limit; omission/overflow and sequence-gap counters make truncation explicit.
 Peers without these optional fields remain compatible. Playback commands and media
 packets are unchanged. See AUDIO_TESTING.md for diagnostic field interpretation.
+
+Timing diagnostics additionally distinguish full `pipelineLatencyMs` from hardware
+`outputLatencyMs`, preserve hardware-only versus corrected timing errors, and record
+sustained-error candidate transitions. These are additive schema-2/protocol-1 fields.

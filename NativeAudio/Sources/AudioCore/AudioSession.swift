@@ -190,8 +190,9 @@ public final class AudioSession {
         var fields = fields
         fields["appState"] = self.appState
         fields["route"] = self.routeInfo
-        let kind = fields["reason"] as? String == "Renderer stopped or restarted"
-          ? "rendererStopped" : "playbackReset"
+        let kind = fields["diagnosticKind"] as? String
+          ?? (fields["reason"] as? String == "Renderer stopped or restarted"
+            ? "rendererStopped" : "playbackReset")
         self.diagnostics.record(kind, at: at, utc: utc, offset: offset,
           origin: self.anchor, fields: fields)
       }
