@@ -20,6 +20,7 @@ private final class AudioPeer {
   var dropped = 0
   var stats = [String: Any]()
   var final = false
+  var diagnosticHistory = ReceivedAudioDiagnostics()
   init(_ tcp: NWConnection) {
     self.tcp = tcp
     var uuid = UUID().uuid
@@ -147,6 +148,9 @@ public final class AudioSession {
   private var lastPeriodic = 0.0
   private var lastRegister = 0.0
   private var lastStats = [String: Any]()
+  private var diagnostics = AudioDiagnostics()
+  private var transportOmissions = 0
+  private var appState = "unknown"
   private var routeInfo = [String: Any]()
   private var lastClockGood = 0.0
   private var endedAt = 0.0
@@ -176,6 +180,20 @@ public final class AudioSession {
       self?.queue.async { [weak self] in
         guard let self = self, stats["generation"] as? String == String(self.stream) else { return }
         self.lastStats = stats
+      }
+    }
+    renderer.onDiagnostic = { [weak self] generation, at, utc, fields in
+      self?.queue.async { [weak self] in
+        guard let self = self, self.stream == generation else { return }
+        // Use the renderer's captured offset, not a newer session estimate.
+        let offset = (fields["clockOffsetMs"] as? Double ?? self.clock.offset * 1000) / 1000
+        var fields = fields
+        fields["appState"] = self.appState
+        fields["route"] = self.routeInfo
+        let kind = fields["reason"] as? String == "Renderer stopped or restarted"
+          ? "rendererStopped" : "playbackReset"
+        self.diagnostics.record(kind, at: at, utc: utc, offset: offset,
+          origin: self.anchor, fields: fields)
       }
     }
     renderer.onEvent = { [weak self] message in
@@ -211,6 +229,11 @@ public final class AudioSession {
   private func command(_ command: String, _ args: [String: Any]) throws {
     switch command {
     case "snapshot": break
+    case "diagnosticLifecycle":
+      if let state = args["appState"] as? String { appState = state }
+      if active {
+        recordDiagnostic(args["kind"] as? String ?? "lifecycle", args: args)
+      }
     case "setRoute": routeInfo = args
     case "markAudibleInterruption":
       guard active else { return }
@@ -505,7 +528,16 @@ public final class AudioSession {
       }
     }
   }
+  private func recordDiagnostic(_ kind: String, args: [String: Any] = [:]) {
+    var fields = args
+    fields["appState"] = appState
+    fields["route"] = routeInfo
+    diagnostics.record(kind, at: args["monotonicSeconds"] as? Double ?? AudioWire.now(),
+      utc: args["at"] as? String ?? ISO8601DateFormatter().string(from: Date()),
+      offset: clock.offset, origin: anchor, fields: fields)
+  }
   private func send(_ object: [String: Any], to p: AudioPeer) {
+    let object = DiagnosticControlFrame.prepare(object, omissions: &transportOmissions)
     guard valid(p), p.pendingTCP < 8,
       var data = try? JSONSerialization.data(withJSONObject: object), data.count <= 16384
     else {
@@ -597,8 +629,12 @@ public final class AudioSession {
         duplicates = 0
         gaps = GapStats()
         lastStats = [:]
+        diagnostics.begin(generation)
+        transportOmissions = 0
       }
+      let newDiagnosticRun = diagnostics.events.isEmpty
       anchor = a
+      if newDiagnosticRun { recordDiagnostic("streamStarted") }
       lead = l
       lookahead = pre
       active = true
@@ -641,8 +677,12 @@ public final class AudioSession {
         log("\(p.name) reported an audible interruption (not an engine measurement)")
       }
     case "stats" where isHost:
-      guard m["generation"] as? String == String(stream), let stats = m["stats"] as? [String: Any]
+      guard m["generation"] as? String == String(stream), var stats = m["stats"] as? [String: Any]
       else { return }
+      if let evidence = stats["diagnostics"] as? [String: Any] {
+        p.diagnosticHistory.merge(evidence["events"] as? [[String: Any]] ?? [], generation: stream)
+        stats["diagnostics"] = p.diagnosticHistory.json(evidence)
+      }
       p.stats = stats
       p.final = m["final"] as? Bool ?? false
     case "heartbeat": break
@@ -720,6 +760,7 @@ public final class AudioSession {
                 self.received += 1
                 self.gaps.arrival(AudioWire.now())
                 if self.gaps.lastGap > 0.1 {
+                  self.recordDiagnostic("receiveGap", args: ["gapMs": self.gaps.lastGap * 1000])
                   self.log("Receive gap: \(Int(self.gaps.lastGap*1000)) ms")
                 }
                 if self.rendererRunning { self.renderer.receive(packet) }
@@ -752,6 +793,7 @@ public final class AudioSession {
       p.dropped = 0
       p.sendErrors = 0
       p.stats = [:]
+      p.diagnosticHistory = ReceivedAudioDiagnostics()
       p.final = false
     }
     let generation = stream
@@ -848,7 +890,7 @@ public final class AudioSession {
       }
     }
     let report: [String: Any] = [
-      "schemaVersion": 1, "protocolVersion": 1, "generation": String(stream),
+      "schemaVersion": 2, "protocolVersion": 1, "generation": String(stream),
       "status": completed ? "completed" : "interrupted",
       "assessment": review ? "needs review" : "run completed",
       "acousticSynchronization": "unverified", "reason": reason,
@@ -946,6 +988,7 @@ public final class AudioSession {
   }
   private func clientStats() -> [String: Any] {
     var s = lastStats
+    s["diagnostics"] = diagnostics.json
     s["received"] = received
     s["networkDuplicates"] = duplicates
     s["arrivalGaps"] = gaps.json

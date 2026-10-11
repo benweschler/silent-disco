@@ -85,3 +85,51 @@ hotspot channel if offered; record channel/band and headphone models in the note
 Two-phone acoustic skew (target 20–30 ms) remains pending: capture simultaneous click
 outputs on one recording timebase. Simulated clients do not substitute for this test.
 USB capture, Mac DJ monitoring, three channels and ten-person capacity are not included.
+
+## Background-playback diagnostic run (report schema 2)
+
+Rebuild/install both apps once after this native-code update; hot reload does not
+load Swift changes. Use the same music file with a 500 ms shared presentation lead:
+
+1. Listen through AirPods with the app foregrounded for 30 seconds.
+2. Background the app for 30 seconds.
+3. Return, then lock the phone with its screen off for 30 seconds.
+4. Wake the screen but leave the phone locked for 30 seconds.
+5. Stop audio on the Mac, wait for report collection, and export the report.
+
+Record approximate transition times and audible behavior. Lock/screen state is
+user-reported; native notifications record app active/inactive/background state.
+Inspect this report before requesting another run. Repeat through the speaker only
+if the first report leaves the cause unclear. This update adds evidence, not a fix.
+
+Each listener has `stats.rendererDiagnostics` (timer intervals, scheduling-pass
+and packet-queue delays) and `stats.diagnostics` (structured event history).
+`playbackReset` snapshots are taken before fading/clearing playback. They include
+actual timing error, player sample time, clock offset adjustment, output latency
+change, compressed-buffer depth, scheduled samples, next deadline, and
+`estimatedPlayableAudioMs`. That estimate uses scheduled minus rendered audio,
+adjusted for playback rate; it is null when player timing is unavailable and is
+not a measurement of audio heard at the headphones. `rendererStopped` records
+normal stop or lifecycle-driven renderer cleanup separately from failure resets.
+
+Events carry generation, sequence, UTC time, local monotonic time, captured clock
+offset and `streamSeconds` relative to the Mac presentation anchor. Negative
+stream time is possible before the presentation anchor. Lifecycle events capture
+time at notification receipt; their clock offset is sampled on the session queue.
+Renderer reset offsets are captured on the renderer queue. Stream-start events
+include app state; route, interruption, activation and receive-gap events help
+correlate transitions with failures. Renderer counters persist through resets but
+restart for a new stream generation.
+
+The phone retains 32 events and transmits its latest eight with existing statistics.
+The Mac deduplicates and retains 256 events per listener. `retentionOverflow`,
+`hostRetentionOverflow`, `transportOmissions` and `observedSequenceGaps` expose
+incomplete evidence. Transport omissions count removed event copies, including
+repeated copies across snapshots. Stats keep the existing 16 KB control-frame limit.
+Old schema-1 reports remain readable; the audio protocol stays at version 1.
+
+Timer delays plus exhausted playable audio suggest scheduling starvation. Resets
+with adequate playable audio suggest clock/player/latency calculation issues.
+Do not change scheduling horizon, reset threshold or codec until the evidence
+supports that change. No full-app or repeated socket tests are needed for this
+instrumentation; physical lock/background behavior is validated by the user.

@@ -84,6 +84,20 @@ final class AudioBridge: NSObject, FlutterStreamHandler {
       session.onListening = { [weak self] active in
         DispatchQueue.main.async { self?.audioSession(active) }
       }
+      // Capture timestamps at notification receipt, before hopping to the session queue.
+      for (notification, kind, state) in [
+        (UIApplication.willResignActiveNotification, "appResignActive", "inactive"),
+        (UIApplication.didEnterBackgroundNotification, "appEnterBackground", "background"),
+        (UIApplication.willEnterForegroundNotification, "appEnterForeground", "inactive"),
+        (UIApplication.didBecomeActiveNotification, "appBecomeActive", "active")
+      ] {
+        observe(notification) { [weak self] _ in
+          self?.diagnostic(kind, fields: ["appState": state])
+        }
+      }
+      let state = UIApplication.shared.applicationState
+      diagnostic("initialAppState", fields: ["appState":
+        state == .active ? "active" : state == .background ? "background" : "inactive"])
       observe(UIApplication.willEnterForegroundNotification) { [weak self] _ in
         if self?.enabled == true { self?.session.perform("foreground") }
       }
@@ -91,6 +105,10 @@ final class AudioBridge: NSObject, FlutterStreamHandler {
         guard let self = self, self.enabled else { return }
         let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? NSNumber)?.uintValue
         let audio = AVAudioSession.sharedInstance()
+        self.diagnostic("audioRouteChanged", fields: [
+          "reason": reason as Any? ?? NSNull(),
+          "outputs": audio.currentRoute.outputs.map(\.portName),
+          "sampleRate": audio.sampleRate, "outputLatencyMs": audio.outputLatency * 1000])
         self.session.perform(
           "setRoute",
           args: [
@@ -104,6 +122,8 @@ final class AudioBridge: NSObject, FlutterStreamHandler {
       observe(AVAudioSession.interruptionNotification) { [weak self] note in
         guard let self = self, self.enabled else { return }
         let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? NSNumber)?.uintValue
+        self.diagnostic("audioInterruption", fields: ["type": type as Any? ?? NSNull(),
+          "options": (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? NSNumber) as Any? ?? NSNull()])
         if type == AVAudioSession.InterruptionType.began.rawValue {
           self.session.perform("interruptionBegan")
         } else {
@@ -117,6 +137,7 @@ final class AudioBridge: NSObject, FlutterStreamHandler {
         }
       }
       observe(AVAudioSession.mediaServicesWereResetNotification) { [weak self] _ in
+        self?.diagnostic("mediaServicesReset")
         if self?.enabled == true { self?.session.perform("mediaReset") }
       }
       let center = MPRemoteCommandCenter.shared()
@@ -180,6 +201,14 @@ final class AudioBridge: NSObject, FlutterStreamHandler {
         NotificationCenter.default.addObserver(
           forName: name, object: nil, queue: .main, using: block))
     }
+    private func diagnostic(_ kind: String, fields: [String: Any] = [:]) {
+      guard enabled else { return }
+      var args = fields
+      args["kind"] = kind
+      args["monotonicSeconds"] = AudioWire.now()
+      args["at"] = ISO8601DateFormatter().string(from: Date())
+      session.perform("diagnosticLifecycle", args: args)
+    }
     private func audioSession(_ active: Bool) {
       do {
         let audio = AVAudioSession.sharedInstance()
@@ -187,6 +216,7 @@ final class AudioBridge: NSObject, FlutterStreamHandler {
           try audio.setCategory(.playback, mode: .default, options: [])
           try audio.setPreferredSampleRate(48000)
           try audio.setActive(true)
+          diagnostic("audioSessionActivated")
           MPNowPlayingInfoCenter.default().nowPlayingInfo = [
             MPMediaItemPropertyTitle: "Silent Disco", MPNowPlayingInfoPropertyIsLiveStream: true,
             MPNowPlayingInfoPropertyPlaybackRate: 1.0,
@@ -211,6 +241,7 @@ final class AudioBridge: NSObject, FlutterStreamHandler {
         }
       } catch {
         if active {
+          diagnostic("audioSessionActivationFailed", fields: ["message": error.localizedDescription])
           session.perform("audioSessionFailed", args: ["message": error.localizedDescription])
         }
       }

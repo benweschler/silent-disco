@@ -75,3 +75,14 @@ selectMode, snapshot, startHost, stopHost, browse, connect, disconnect, setSourc
 setBuffer, startStream, stopStream, listen, stopListening, markAudibleInterruption, exportReport. Lifecycle and route
 commands remain native. Reports retain final/incomplete counters, gap counts/durations,
 route and interruption events, and always label acoustic synchronization unverified.
+
+## Optional diagnostic evidence
+
+Protocol version 1 statistics may include `rendererDiagnostics` and `diagnostics`.
+The latter contains up to eight recent run-scoped events with sequence numbers,
+generation, UTC/monotonic timestamps, captured clock offset and stream-relative
+time. The receiver deduplicates and accumulates evidence for schema-2 reports.
+Evidence is bounded and trimmed before serialization to the existing 16 KB frame
+limit; omission/overflow and sequence-gap counters make truncation explicit.
+Peers without these optional fields remain compatible. Playback commands and media
+packets are unchanged. See AUDIO_TESTING.md for diagnostic field interpretation.
