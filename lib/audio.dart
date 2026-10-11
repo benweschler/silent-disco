@@ -93,6 +93,18 @@ class _AudioScreenState extends State<AudioScreen> {
           ),
         ],
       ),
+      bottomNavigationBar: active
+          ? SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: OutlinedButton.icon(
+                  onPressed: () => _call('markAudibleInterruption'),
+                  icon: const Icon(Icons.flag_outlined),
+                  label: const Text('Mark audible interruption'),
+                ),
+              ),
+            )
+          : null,
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 850),
@@ -225,8 +237,23 @@ class _AudioScreenState extends State<AudioScreen> {
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     title: Text('${raw['name']}'),
-                    subtitle: Text(
-                      '${raw['listening'] == true ? 'Listening' : 'Connected'} · UDP ${raw['ready'] == true ? 'ready' : 'pending'}\nPackets sent ${raw['submitted']} · queue drops ${raw['queueDrops']}\n${raw['stats'] ?? {}}',
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${raw['listening'] == true ? 'Listening' : 'Connected'} · UDP ${raw['ready'] == true ? 'ready' : 'pending'}\nPackets sent ${raw['submitted']} · queue drops ${raw['queueDrops']}',
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          height: 180,
+                          child: Scrollbar(
+                            child: SingleChildScrollView(
+                              primary: false,
+                              child: SelectableText('${raw['stats'] ?? {}}'),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
               ] else ...[
@@ -325,12 +352,6 @@ class _AudioScreenState extends State<AudioScreen> {
                 ),
               ],
               const Divider(),
-              if (active)
-                OutlinedButton.icon(
-                  onPressed: () => _call('markAudibleInterruption'),
-                  icon: const Icon(Icons.flag_outlined),
-                  label: const Text('Mark audible interruption'),
-                ),
               const Text(
                 'Acoustic synchronization: unverified. Shared timing does not establish what different headphones emit.',
               ),
@@ -352,12 +373,22 @@ class _AudioScreenState extends State<AudioScreen> {
               ExpansionTile(
                 title: const Text('Recent events'),
                 children: [
-                  for (final raw
-                      in (_state['events'] as List? ?? []).reversed.take(20))
-                    ListTile(
-                      title: Text('${raw['message']}'),
-                      subtitle: Text('${raw['at']}'),
+                  SizedBox(
+                    height: 240,
+                    child: ListView(
+                      primary: false,
+                      children: [
+                        for (final raw
+                            in (_state['events'] as List? ?? []).reversed.take(
+                              20,
+                            ))
+                          ListTile(
+                            title: Text('${raw['message']}'),
+                            subtitle: Text('${raw['at']}'),
+                          ),
+                      ],
                     ),
+                  ),
                 ],
               ),
             ],
