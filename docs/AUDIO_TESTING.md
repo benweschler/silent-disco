@@ -194,3 +194,11 @@ background for 30 seconds and return, then perform three lock/wake cycles with 1
 seconds locked and screen off each time. Mark audible disruptions, stop on the Mac,
 and inspect the report before requesting further runs. Do not change the 100 ms
 horizon, 50 ms/200 ms decision, lead choices or codec during this diagnostic step.
+
+Use the Mac's fixed **Mark phone transition** menu immediately before each phone
+action. It marks your intended action approximately, not an automatically detected
+lock. Use **Wake screen while locked** separately from **Unlock phone**. Protected-data
+notifications provide a complementary public iOS signal, but passcode configuration
+and notification delivery affect it; do not treat their absence as proof that the
+phone stayed unlocked. Compare markers, protected-data events, lifecycle events and
+timestamp windows together.

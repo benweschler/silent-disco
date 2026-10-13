@@ -126,6 +126,7 @@ private final class AudioTransmitter {
 public final class AudioSession {
   public let isHost: Bool
   private let queue = DispatchQueue(label: "dev.silentdisco.audio.transport", qos: .userInitiated)
+  public var onDiagnosticStreamStart: (() -> Void)?
   public var onSnapshot: (([String: Any]) -> Void)?
   public var onReport: (([String: Any]) -> Void)?
   public var onActivity: ((Bool) -> Void)?
@@ -186,6 +187,9 @@ public final class AudioSession {
   private var senderWork = [String: Any]()
   private var senderDelivery = SenderDiagnostics()
   private var appState = "unknown"
+  private var protectedDataAvailable: Bool?
+  private var testMarkers = [[String: Any]]()
+  private var testMarkerOverflow = 0
   private var routeInfo = [String: Any]()
   private var lastClockGood = 0.0
   private var endedAt = 0.0
@@ -259,6 +263,12 @@ public final class AudioSession {
     }
   }
   public func perform(_ command: String, args: [String: Any] = [:]) {
+    var capturedArgs = args
+    if command == "markTestTransition" {
+      capturedArgs["monotonicSeconds"] = AudioWire.now()
+      capturedArgs["at"] = ISO8601DateFormatter().string(from: Date())
+    }
+    let args = capturedArgs
     queue.async { [weak self] in
       guard let self = self else { return }
       do { try self.command(command, args) } catch {
@@ -278,9 +288,18 @@ public final class AudioSession {
     case "snapshot": break
     case "diagnosticLifecycle":
       if let state = args["appState"] as? String { appState = state }
+      if let value = args["protectedDataAvailable"] as? Bool { protectedDataAvailable = value }
       if active {
         recordDiagnostic(args["kind"] as? String ?? "lifecycle", args: args)
       }
+    case "markTestTransition":
+      guard isHost, active, let marker = args["marker"] as? String,
+        let at = args["monotonicSeconds"] as? Double,
+        let utc = args["at"] as? String,
+        let event = AudioTestMarker.event(marker, at: at, utc: utc, origin: anchor) else { return }
+      testMarkers.append(event)
+      if testMarkers.count > 256 { testMarkers.removeFirst(); testMarkerOverflow += 1 }
+      log("User-reported transition: \(event["message"] as? String ?? marker)")
     case "setRoute": routeInfo = args
     case "markAudibleInterruption":
       guard active else { return }
@@ -583,6 +602,7 @@ public final class AudioSession {
   private func recordDiagnostic(_ kind: String, args: [String: Any] = [:]) {
     var fields = args
     fields["appState"] = appState
+    fields["protectedDataAvailable"] = protectedDataAvailable as Any? ?? NSNull()
     fields["route"] = routeInfo
     diagnostics.record(kind, at: args["monotonicSeconds"] as? Double ?? AudioWire.now(),
       utc: args["at"] as? String ?? ISO8601DateFormatter().string(from: Date()),
@@ -687,7 +707,10 @@ public final class AudioSession {
       }
       let newDiagnosticRun = diagnostics.events.isEmpty
       anchor = a
-      if newDiagnosticRun { recordDiagnostic("streamStarted") }
+      if newDiagnosticRun {
+        recordDiagnostic("streamStarted")
+        onDiagnosticStreamStart?()
+      }
       lead = l
       lookahead = pre
       active = true
@@ -840,6 +863,8 @@ public final class AudioSession {
     senderWork = [:]
     senderDelivery = SenderDiagnostics()
     audibleReports = 0
+    testMarkers = []
+    testMarkerOverflow = 0
     lastSequence = nil
     endedPeers = []
     events = []
@@ -968,6 +993,7 @@ public final class AudioSession {
       "userReportedAudibleInterruptions": audibleReports, "listeners": rows,
       "completeCounters": allFinal,
       "notes": notes, "offlineSetupUserConfirmed": offline, "events": events,
+      "testMarkers": testMarkers, "testMarkerRetentionOverflow": testMarkerOverflow,
       "os": ProcessInfo.processInfo.operatingSystemVersionString,
     ]
     latestReport = report

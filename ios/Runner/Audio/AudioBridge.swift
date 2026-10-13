@@ -84,6 +84,16 @@ final class AudioBridge: NSObject, FlutterStreamHandler {
       session.onListening = { [weak self] active in
         DispatchQueue.main.async { self?.audioSession(active) }
       }
+      session.onDiagnosticStreamStart = { [weak self] in
+        DispatchQueue.main.async { self?.diagnostic("protectedDataStateAtStreamStart") }
+      }
+      for (notification, kind) in [
+        (UIApplication.protectedDataWillBecomeUnavailableNotification, "protectedDataWillBecomeUnavailable"),
+        (UIApplication.protectedDataDidBecomeAvailableNotification, "protectedDataDidBecomeAvailable")
+      ] {
+        observe(notification) { [weak self] _ in self?.diagnostic(kind) }
+      }
+      diagnostic("initialProtectedDataState")
       // Capture timestamps at notification receipt, before hopping to the session queue.
       for (notification, kind, state) in [
         (UIApplication.willResignActiveNotification, "appResignActive", "inactive"),
@@ -204,6 +214,9 @@ final class AudioBridge: NSObject, FlutterStreamHandler {
     private func diagnostic(_ kind: String, fields: [String: Any] = [:]) {
       guard enabled else { return }
       var args = fields
+      #if os(iOS)
+        args["protectedDataAvailable"] = UIApplication.shared.isProtectedDataAvailable
+      #endif
       args["kind"] = kind
       args["monotonicSeconds"] = AudioWire.now()
       args["at"] = ISO8601DateFormatter().string(from: Date())

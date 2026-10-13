@@ -97,10 +97,49 @@ class _AudioScreenState extends State<AudioScreen> {
           ? SafeArea(
               child: Padding(
                 padding: const EdgeInsets.all(12),
-                child: OutlinedButton.icon(
-                  onPressed: () => _call('markAudibleInterruption'),
-                  icon: const Icon(Icons.flag_outlined),
-                  label: const Text('Mark audible interruption'),
+                child: Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: () => _call('markAudibleInterruption'),
+                      icon: const Icon(Icons.flag_outlined),
+                      label: const Text('Mark audible interruption'),
+                    ),
+                    if (widget.isHost)
+                      PopupMenuButton<String>(
+                        tooltip: 'Record an approximate phone transition',
+                        onSelected: (marker) =>
+                            _call('markTestTransition', {'marker': marker}),
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(
+                            value: 'background',
+                            child: Text('Background app'),
+                          ),
+                          PopupMenuItem(
+                            value: 'foreground',
+                            child: Text('Return to app'),
+                          ),
+                          PopupMenuItem(
+                            value: 'lock',
+                            child: Text('Lock phone'),
+                          ),
+                          PopupMenuItem(
+                            value: 'wakeLocked',
+                            child: Text('Wake screen while locked'),
+                          ),
+                          PopupMenuItem(
+                            value: 'unlock',
+                            child: Text('Unlock phone'),
+                          ),
+                        ],
+                        child: const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: Text('Mark phone transition ▾'),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             )

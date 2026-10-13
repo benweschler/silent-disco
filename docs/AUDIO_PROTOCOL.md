@@ -129,3 +129,18 @@ wall times and `senderDiagnostics.delivery` send-slot lateness at transport proc
 with maxima, measurement counts and exceedance counts at 20/50/100 ms. Values are
 aggregates, not packet traces. Receive gaps measure UDP callback delivery; they do
 not independently establish Wi-Fi delay or permanent packet loss.
+
+Protected-data events use the public iOS notifications and include the captured
+`protectedDataAvailable` value; a will-become-unavailable notification may still
+report true at receipt. Initial state is retained when idle. `streamStarted` carries
+the latest known state, followed by `protectedDataStateAtStreamStart`, captured on
+the main queue when the stream-start capture request is handled. Its timestamp is
+that capture time, not an inferred lock time. These events neither detect exact
+screen-off/wake times nor change audio/session behavior.
+
+The Mac-only `markTestTransition` command accepts `marker`: `background`, `foreground`,
+`lock`, `wakeLocked`, or `unlock`. Native receipt time is captured before queueing.
+Active-run reports retain up to 256 `testMarkers` with UTC, monotonic and stream-relative
+times and `kind: userReportedTransition`; `testMarkerRetentionOverflow` exposes loss.
+Markers reset per run, do not increment audible interruption counts, and are separate
+from the rolling human-readable log. No control-protocol messages are added.

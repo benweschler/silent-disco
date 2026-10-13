@@ -266,10 +266,12 @@ public final class AudioRenderer {
     defer { passLatency = nil }
     let hostNow = now + offset
     guard context.valid else {
+      let timing = measured("timestampRead") { readTiming(context) }
+      measured("observationRead") { observeTiming(timing, at: now) }
       let decision = timingDecision.observe(error: nil, at: now)
       errorMs = nil
       latestTiming = nil
-      if let transition = decision.transition { timingEvent(transition, timing: readTiming(context)) }
+      if let transition = decision.transition { timingEvent(transition, timing: timing) }
       reportIfDue(now)
       return
     }
