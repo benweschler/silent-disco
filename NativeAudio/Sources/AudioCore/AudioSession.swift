@@ -201,7 +201,9 @@ public final class AudioSession {
   private var endedPeers = [[String: Any]]()
   private var latestReport: [String: Any]?
   private var status = "idle"
-  private var errorText = ""
+  private var errors = AudioSessionErrors()
+  private var failedCommand: String?
+  private var errorText: String { errors.visible(connected: client?.ready == true) }
   private var renderAllowed = true
   private var clientStop: DispatchWorkItem?
   private let startListener: (NWListener, DispatchQueue) -> Void
@@ -230,6 +232,8 @@ public final class AudioSession {
       self?.queue.async { [weak self] in
         guard let self = self, stats["generation"] as? String == String(self.stream) else { return }
         self.lastStats = stats
+        self.errors.rendererStats(state: stats["state"] as? String,
+          listening: self.wants, running: self.rendererRunning)
       }
     }
     renderer.onDiagnostic = { [weak self] generation, at, utc, fields in
@@ -253,7 +257,7 @@ public final class AudioSession {
     renderer.onError = { [weak self] message in
       self?.queue.async { [weak self] in
         guard let self = self else { return }
-        self.errorText = message
+        self.errors.set(.renderer, message)
         self.wants = false
         self.stopRenderer()
         if let p = self.client { self.send(["type": "listen", "enabled": false], to: p) }
@@ -271,9 +275,16 @@ public final class AudioSession {
     let args = capturedArgs
     queue.async { [weak self] in
       guard let self = self else { return }
-      do { try self.command(command, args) } catch {
-        self.errorText = error.localizedDescription
-        self.log(self.errorText)
+      do {
+        try self.command(command, args)
+        if self.failedCommand == command {
+          self.errors.clear(.command)
+          self.failedCommand = nil
+        }
+      } catch {
+        self.failedCommand = command
+        self.errors.set(.command, error.localizedDescription)
+        self.log(error.localizedDescription)
       }
       self.publish()
     }
@@ -316,7 +327,10 @@ public final class AudioSession {
           hostFailed("Audio host failed to start: \(error.localizedDescription)")
         }
       }
-    case "stopHost", "sleep": shutdown(reason: command == "sleep" ? "Mac sleeping" : "Host stopped")
+    case "stopHost", "sleep":
+      shutdown(reason: command == "sleep" ? "Mac sleeping" : "Host stopped")
+      errors.clear(.hostTransport)
+      errors.clear(.hostDiscovery)
     case "browse":
       reconnect = true
       browse()
@@ -343,6 +357,8 @@ public final class AudioSession {
       connect()
       ensureTicker()
     case "disconnect":
+      errors.clear(.connection)
+      errors.clear(.discovery)
       reconnect = false
       wants = false
       disconnectClient("Disconnected")
@@ -379,7 +395,6 @@ public final class AudioSession {
     case "listen":
       guard !isHost else { return }
       wants = true
-      errorText = ""
       onListening?(true)
       if let p = client { send(["type": "listen", "enabled": true], to: p) }
       maybeRender()
@@ -388,12 +403,13 @@ public final class AudioSession {
       stopRenderer()
       if let p = client { send(["type": "listen", "enabled": false], to: p) }
     case "audioSessionReady":
+      errors.clear(.audioSession)
       renderAllowed = true
       maybeRender()
     case "audioSessionFailed":
       wants = false
       renderAllowed = false
-      errorText = args["message"] as? String ?? "Audio session failed"
+      errors.set(.audioSession, args["message"] as? String ?? "Audio session failed")
       stopRenderer()
       if let p = client { send(["type": "listen", "enabled": false], to: p) }
     case "routeChanged":
@@ -456,7 +472,6 @@ public final class AudioSession {
   }
   private func startHost(advertise: Bool = true) throws {
     guard listener == nil else { return }
-    if advertise { errorText = "" }
     status = "starting"
     let u = try NWListener(using: parameters(false), on: .any)
     let t = try NWListener(using: parameters(true), on: .any)
@@ -490,6 +505,8 @@ public final class AudioSession {
       guard let self = self, self.listener === t else { return }
       if case .ready = state {
         self.status = "hosting"
+        self.errors.clear(.hostTransport)
+        if advertise { self.errors.clear(.hostDiscovery) }
         self.publish()
       }
       if case .failed(let e) = state {
@@ -497,7 +514,7 @@ public final class AudioSession {
           // Bonjour failure also kills its TCP listener. Recreate the transport once,
           // without advertising, so manual-address connections remain available.
           self.hostFailed(
-            "Bonjour discovery unavailable: \(e). Retrying without discovery. Connect from iPhone using the Mac's LAN address and displayed TCP port. Check Local Network permission; if already enabled, quit and reopen the Mac app."
+            "Bonjour discovery unavailable: \(e). Retrying without discovery. Connect from iPhone using the Mac's LAN address and displayed TCP port. Check Local Network permission; if already enabled, quit and reopen the Mac app.", category: .hostDiscovery
           )
           do { try self.startHost(advertise: false) } catch {
             self.hostFailed("Audio host retry failed: \(error.localizedDescription)")
@@ -507,7 +524,7 @@ public final class AudioSession {
         }
       }
       if case .waiting(let e) = state {
-        self.errorText = "Audio host waiting: \(e)"
+        self.errors.set(.hostTransport, "Audio host waiting: \(e)")
         self.publish()
       }
     }
@@ -515,8 +532,8 @@ public final class AudioSession {
     startListener(t, queue)
     ensureTicker()
   }
-  private func hostFailed(_ message: String) {
-    errorText = message
+  private func hostFailed(_ message: String, category: AudioSessionErrors.Kind = .hostTransport) {
+    errors.set(category, message)
     log(message)
     NSLog("Silent Disco Audio: %@", message)
     shutdown(reason: message)
@@ -528,7 +545,8 @@ public final class AudioSession {
     let b = NWBrowser(for: .bonjour(type: AudioWire.service, domain: nil), using: parameters(true))
     browser = b
     b.browseResultsChangedHandler = { [weak self, weak b] results, _ in
-      guard let self = self, self.browser === b else { return }
+      guard let self = self, let b = b, self.browser === b else { return }
+      if !results.isEmpty { self.errors.clear(.discovery) }
       self.services = Dictionary(
         uniqueKeysWithValues: results.map { ($0.endpoint.debugDescription, $0.endpoint) })
       if let saved = self.selectedService,
@@ -543,11 +561,15 @@ public final class AudioSession {
       }
       self.publish()
     }
-    b.stateUpdateHandler = { [weak self] state in
-      if case .failed(let e) = state {
-        self?.errorText = "Discovery failed: \(e). Check Local Network permission."
-        self?.publish()
+    b.stateUpdateHandler = { [weak self, weak b] state in
+      guard let self = self, let b = b, self.browser === b else { return }
+      switch state {
+      case .ready: self.errors.clear(.discovery)
+      case .failed(let e), .waiting(let e):
+        self.errors.set(.discovery, "Discovery failed: \(e). Check Local Network permission.")
+      default: break
       }
+      self.publish()
     }
     b.start(queue: queue)
   }
@@ -564,13 +586,16 @@ public final class AudioSession {
       guard let self = self, let p = p, self.valid(p) else { return }
       switch state {
       case .ready:
+        self.errors.clear(.connection)
         if !self.isHost {
           self.send(
             ["type": "hello", "version": 1, "name": ProcessInfo.processInfo.hostName], to: p)
         }
         self.receiveTCP(p)
       case .failed(let e): self.drop(p, "Connection failed: \(e)")
-      case .waiting(let e): self.errorText = "Connection waiting: \(e)"
+      case .waiting(let e):
+        self.errors.set(.connection, "Connection waiting: \(e)")
+        self.publish()
       default: break
       }
     }
@@ -825,6 +850,7 @@ public final class AudioSession {
           if packet.kind == 1 && !p.ready {
             p.ready = true
             self.status = "connected"
+            self.errors.clear(.connection)
             self.retryIndex = 0
             self.send(["type": "ready"], to: p)
             self.send(["type": "listen", "enabled": self.wants], to: p)
@@ -868,7 +894,6 @@ public final class AudioSession {
     lastSequence = nil
     endedPeers = []
     events = []
-    errorText = ""
     for p in peers.values {
       p.submitted = 0
       p.dropped = 0
@@ -1092,7 +1117,7 @@ public final class AudioSession {
     s["clockReady"] = clock.ready
     s["route"] = routeInfo
     s["events"] = Array(events.suffix(20))
-    s["renderError"] = errorText
+    s["renderError"] = errors.renderingError
     return s
   }
   private func ensureTicker() {

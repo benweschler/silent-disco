@@ -144,3 +144,14 @@ Active-run reports retain up to 256 `testMarkers` with UTC, monotonic and stream
 times and `kind: userReportedTransition`; `testMarkerRetentionOverflow` exposes loss.
 Markers reset per run, do not increment audible interruption counts, and are separate
 from the rolling human-readable log. No control-protocol messages are added.
+
+
+Session errors are tracked by subsystem. Listener discovery faults are suppressed
+while the host connection is ready, but remain available if that connection is lost;
+current-browser ready/results clear discovery faults. Superseded browser callbacks
+are ignored. TCP readiness clears connection waiting errors; successful advertised
+hosting clears host discovery warnings, while a manual-only fallback retains them.
+Audio-session readiness and playing renderer statistics clear only their respective
+faults. Successful retry clears its own command error; unrelated commands do not.
+Explicit stop-host/disconnect clears faults for the stopped subsystem. Reports'
+`renderError` contains audio-session/renderer failures, not discovery/command errors.
