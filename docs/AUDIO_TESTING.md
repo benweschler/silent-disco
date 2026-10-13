@@ -175,3 +175,22 @@ enough for the Mac to remove the idle listener, then start music on the Mac.
 Reopen the phone: it should reconnect and play without another Listen tap. Repeat
 with Stop listening or Disconnect selected first; audio must not start itself.
 A manual endpoint still requires a new port if the host itself was restarted.
+
+### Investigating renderer stalls and lock-related timing drift
+
+Playback behavior is unchanged by the scheduling-stall diagnostics. First inspect
+`passDiagnostics`: the current partial pass and previous completed pass have separate
+sequence numbers. A long decode/PCM/scheduling stage identifies where wall time was
+spent; short stage execution plus long timer intervals points toward scheduling.
+Wall time includes descheduling, so expensive wall time alone does not prove CPU cost.
+Compare sender work/send lateness and both transport timers before blaming receive
+gaps on the LAN. Clean earlier runs do not support an inherent hardware limitation.
+Use the attached timestamp windows to compare player and output-node progress and
+latency/clock changes around timing candidates, while respecting playback restarts.
+
+The next physical run should use a Release iPhone build without a debugger, the same
+music file, AirPods, Mac-hosted LAN and 500 ms lead. Play foregrounded for 30 seconds,
+background for 30 seconds and return, then perform three lock/wake cycles with 15
+seconds locked and screen off each time. Mark audible disruptions, stop on the Mac,
+and inspect the report before requesting further runs. Do not change the 100 ms
+horizon, 50 ms/200 ms decision, lead choices or codec during this diagnostic step.

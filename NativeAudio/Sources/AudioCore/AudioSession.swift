@@ -45,10 +45,15 @@ private final class AudioTransmitter {
   var onFrame: ((UInt64, Double, Data, Int, @escaping () -> Void) -> Void)?
   private let deliverySlots = DispatchSemaphore(value: 2)
   var onEnd: ((String) -> Void)?
+  var onDiagnostics: (([String: Any]) -> Void)?
+  private var diagnostics = SenderDiagnostics()
+  private var lastDiagnostics = 0.0
   func start(kind: AudioSource.Kind, url: URL?, lead: Double) {
     queue.async {
       do {
         self.timer?.cancel()
+        self.diagnostics = SenderDiagnostics()
+        self.lastDiagnostics = 0
         let source = try AudioSource(kind: kind, url: url)
         let codec = try AudioCodec()
         let start = AudioWire.now() + 0.15
@@ -64,12 +69,24 @@ private final class AudioTransmitter {
           guard elapsed < AudioWire.maxDuration else {
             self.timer?.cancel()
             self.timer = nil
+            self.onDiagnostics?(self.diagnostics.json)
             self.onEnd?("completed")
             return
           }
           guard let slot = pacer.take(elapsed: elapsed) else { return }
           do {
-            let payload = try codec.encode(source.frame(at: slot * 960))
+            let sourceStart = AudioWire.now()
+            let samples = try source.frame(at: slot * 960)
+            let encodeStart = AudioWire.now()
+            self.diagnostics.record("source", seconds: encodeStart - sourceStart)
+            let payload = try codec.encode(samples)
+            let encodedAt = AudioWire.now()
+            self.diagnostics.record("encoding", seconds: encodedAt - encodeStart)
+            self.diagnostics.record("handoffLateness", seconds: encodedAt - start - Double(slot) * 0.020)
+            if encodedAt - self.lastDiagnostics >= 1 {
+              self.lastDiagnostics = encodedAt
+              self.onDiagnostics?(self.diagnostics.json)
+            }
             if self.deliverySlots.wait(timeout: .now()) == .success {
               let slots = self.deliverySlots
               if let callback = self.onFrame {
@@ -86,6 +103,7 @@ private final class AudioTransmitter {
           } catch {
             self.timer?.cancel()
             self.timer = nil
+            self.onDiagnostics?(self.diagnostics.json)
             self.onEnd?(error.localizedDescription)
           }
         }
@@ -98,6 +116,7 @@ private final class AudioTransmitter {
     queue.async {
       self.timer?.cancel()
       self.timer = nil
+      self.onDiagnostics?(self.diagnostics.json)
     }
   }
   deinit { timer?.cancel() }
@@ -152,6 +171,20 @@ public final class AudioSession {
   private var lastStats = [String: Any]()
   private var diagnostics = AudioDiagnostics()
   private var transportOmissions = 0
+  private var transportTimer = TransportTimerDiagnostics()
+  private var buildInfo: [String: Any] = {
+    #if DEBUG
+      let configuration = "Debug"
+    #else
+      let configuration = "Release"
+    #endif
+    return ["configuration": configuration,
+      "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+      "appBuild": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+      "os": ProcessInfo.processInfo.operatingSystemVersionString]
+  }()
+  private var senderWork = [String: Any]()
+  private var senderDelivery = SenderDiagnostics()
   private var appState = "unknown"
   private var routeInfo = [String: Any]()
   private var lastClockGood = 0.0
@@ -650,6 +683,7 @@ public final class AudioSession {
         lastStats = [:]
         diagnostics.begin(generation)
         transportOmissions = 0
+        transportTimer = TransportTimerDiagnostics()
       }
       let newDiagnosticRun = diagnostics.events.isEmpty
       anchor = a
@@ -802,6 +836,9 @@ public final class AudioSession {
     started = AudioWire.now()
     startedDate = ISO8601DateFormatter().string(from: Date())
     skipped = 0
+    transportTimer = TransportTimerDiagnostics()
+    senderWork = [:]
+    senderDelivery = SenderDiagnostics()
     audibleReports = 0
     lastSequence = nil
     endedPeers = []
@@ -827,6 +864,12 @@ public final class AudioSession {
         self.publish()
       }
     }
+    tx.onDiagnostics = { [weak self] value in
+      self?.queue.async { [weak self] in
+        guard let self = self, self.stream == generation else { return }
+        self.senderWork = value
+      }
+    }
     tx.onFrame = { [weak self] sequence, presentation, payload, skipped, complete in
       guard let self = self else {
         complete()
@@ -837,6 +880,8 @@ public final class AudioSession {
         guard let self = self, self.active, self.stream == generation else { return }
         self.skipped = skipped
         self.lastSequence = sequence
+        self.senderDelivery.record("sendSlotLateness", seconds: AudioWire.now()
+          - (presentation + Double(self.lookahead) / 48000 - self.lead))
         for p in Array(self.peers.values) where p.ready && p.wants {
           guard let c = p.udp, p.pendingUDP < 4, presentation > AudioWire.now() else {
             p.dropped += 1
@@ -918,6 +963,8 @@ public final class AudioSession {
       "source": sourceName, "leadMs": lead * 1000,
       "codec": "Opus 1.6.1 / 160 kbps CVBR / stereo 48 kHz / 20 ms",
       "lookaheadSamples": lookahead, "skippedSendSlots": skipped,
+      "senderDiagnostics": ["work": senderWork, "delivery": senderDelivery.json],
+      "transportTimerDiagnostics": transportTimer.json,
       "userReportedAudibleInterruptions": audibleReports, "listeners": rows,
       "completeCounters": allFinal,
       "notes": notes, "offlineSetupUserConfirmed": offline, "events": events,
@@ -1008,6 +1055,8 @@ public final class AudioSession {
   private func clientStats() -> [String: Any] {
     var s = lastStats
     s["diagnostics"] = diagnostics.json
+    s["transportTimerDiagnostics"] = transportTimer.json
+    s["buildInfo"] = buildInfo
     s["received"] = received
     s["networkDuplicates"] = duplicates
     s["arrivalGaps"] = gaps.json
@@ -1030,6 +1079,7 @@ public final class AudioSession {
   }
   private func tick() {
     let now = now()
+    if active { transportTimer.tick(now) }
     if !isHost, clock.ready, now - lastClockGood > 10 {
       clock = ClockEstimate()
       stopRenderer(deactivate: false)

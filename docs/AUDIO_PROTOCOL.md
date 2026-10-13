@@ -96,3 +96,36 @@ of receive silence and bypasses reconnect backoff for that attempt. Host selecti
 and listening intent persist; explicit Disconnect/Stop listening take precedence.
 Idle background execution is not guaranteed and the host heartbeat timeout remains
 five seconds. No additional wire messages or protocol version changes are required.
+
+### Scheduling-stall evidence (additive schema 2)
+
+`rendererDiagnostics.passDiagnostics` distinguishes `completedPass` from
+`currentPartialPass`, each with sequence, start time, decoded-frame count and stage
+wall times. `lastSchedulingPassMs` remains the previous completed pass duration.
+Stage maxima distinguish single-call and whole-pass maxima; counts, decoded frames,
+slow passes and suppressed slow events survive playback resets and reset on a new
+stream generation. Stages cover latency/timestamp/observation reads, rate changes,
+Opus decoding, PCM preparation, scheduling/play, and statistics. These measure wall
+time, including thread descheduling; they are not CPU-time measurements.
+`slowRendererPass` (>20 ms) is emitted at most once per second.
+
+`timingObservations` contains up to 16 native observations at 100 ms spacing:
+paired player/node timestamps, separately observed output-node timestamps, rates,
+clock offset, pipeline latency, queued samples and timing error. Null means invalid
+or unavailable. Windows accompany candidate start/sustained and playback reset
+events. `playbackStarted` records the Mac presentation anchor and scheduled host
+start time, including restarts. Output-node timestamps are observational only.
+
+Before omitting events to fit the 16 KB frame limit, serialization removes oldest
+observations. Per-event and frame `observationOmissions` count removed observation
+copies in that serialization; they are not cumulative run counters. Existing event
+omission, retention and sequence-gap counters retain their meanings. Final statistics
+use the same bounded serializer and Mac event deduplication.
+
+Listener `buildInfo` identifies Debug/Release compilation, app version/build and OS.
+`transportTimerDiagnostics` measures the 100 ms session timer, with gap thresholds
+150/250/500 ms. Host reports include `senderDiagnostics.work` source/encode/handoff
+wall times and `senderDiagnostics.delivery` send-slot lateness at transport processing,
+with maxima, measurement counts and exceedance counts at 20/50/100 ms. Values are
+aggregates, not packet traces. Receive gaps measure UDP callback delivery; they do
+not independently establish Wi-Fi delay or permanent packet loss.

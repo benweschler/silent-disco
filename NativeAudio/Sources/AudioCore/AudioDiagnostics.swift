@@ -110,13 +110,23 @@ enum DiagnosticControlFrame {
       var diagnostics = stats["diagnostics"] as? [String: Any] else { return object }
     var result = object
     var events = diagnostics["events"] as? [[String: Any]] ?? []
+    var observationOmissions = diagnostics["observationOmissions"] as? Int ?? 0
     while true {
       diagnostics["events"] = events
       diagnostics["transportOmissions"] = omissions
+      diagnostics["observationOmissions"] = observationOmissions
       stats["diagnostics"] = diagnostics
       result["stats"] = stats
       if let data = try? JSONSerialization.data(withJSONObject: result), data.count <= 16384 {
         return result
+      }
+      if let index = events.firstIndex(where: { !($0["timingObservations"] as? [[String: Any]] ?? []).isEmpty }) {
+        var observations = events[index]["timingObservations"] as! [[String: Any]]
+        observations.removeFirst()
+        events[index]["timingObservations"] = observations
+        events[index]["observationOmissions"] = (events[index]["observationOmissions"] as? Int ?? 0) + 1
+        observationOmissions += 1
+        continue
       }
       guard !events.isEmpty else { return result }
       events.removeFirst()

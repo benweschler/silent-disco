@@ -34,6 +34,28 @@ public final class AudioRenderer {
   private var retiredDuplicates = 0
   private var retiredRejected = 0
   private var measurements = RenderMeasurements()
+  private var passDiagnostics = RendererPassDiagnostics()
+  private var observations = TimingObservationWindow()
+  private func measured<T>(_ stage: String, _ work: () throws -> T) rethrows -> T {
+    let start = AudioWire.now()
+    defer { passDiagnostics.stage(stage, seconds: AudioWire.now() - start) }
+    return try work()
+  }
+  private func observeTiming(_ timing: PlaybackTiming, at now: Double) {
+    guard observations.due(at: now) else { return }
+    var fields = timing.json(scheduled: scheduled, rate: Double(speed.rate))
+    fields["playerNodeSampleTime"] = timing.nodeSampleTime as Any? ?? NSNull()
+    fields["playerNodeSampleRate"] = timing.nodeSampleRate as Any? ?? NSNull()
+    let output = engine.outputNode.lastRenderTime
+    fields["outputNodeHostSeconds"] = output.flatMap { $0.isHostTimeValid ? AVAudioTime.seconds(forHostTime: $0.hostTime) : nil } as Any? ?? NSNull()
+    fields["outputNodeSampleTime"] = output.flatMap { $0.isSampleTimeValid ? $0.sampleTime : nil } as Any? ?? NSNull()
+    fields["outputNodeSampleRate"] = output.flatMap { $0.sampleRate.isFinite ? $0.sampleRate : nil } as Any? ?? NSNull()
+    fields["clockOffsetMs"] = offset * 1000
+    fields["playbackRate"] = speed.rate
+    fields["scheduledSamples"] = scheduled
+    fields["presentationAnchorMacSeconds"] = anchorPresentation
+    observations.append(at: now, fields: fields)
+  }
   private var offsetAdjustment = 0.0
   private var initialLatency = 0.0
   private var initialPipelineLatency = 0.0
@@ -61,7 +83,9 @@ public final class AudioRenderer {
       nodeHost: node.flatMap { $0.isHostTimeValid ? AVAudioTime.seconds(forHostTime: $0.hostTime) : nil },
       sampleTime: position.flatMap { $0.isSampleTimeValid ? $0.sampleTime : nil },
       sampleRate: position?.sampleRate ?? 0, offset: offset,
-      presentationAnchor: anchorPresentation, latency: latency)
+      presentationAnchor: anchorPresentation, latency: latency,
+      nodeSampleTime: node.flatMap { $0.isSampleTimeValid ? $0.sampleTime : nil },
+      nodeSampleRate: node.flatMap { $0.sampleRate.isFinite ? $0.sampleRate : nil })
   }
   public func start(generation: UInt64, offset: Double) {
     queue.async {
@@ -78,6 +102,8 @@ public final class AudioRenderer {
           self.rebuffer += 1
         } else {
           self.measurements = RenderMeasurements()
+          self.passDiagnostics = RendererPassDiagnostics()
+          self.observations = TimingObservationWindow()
           self.offsetAdjustment = 0
           self.retiredLate = 0
           self.retiredDuplicates = 0
@@ -179,6 +205,8 @@ public final class AudioRenderer {
   private func captureReset(_ reason: String, timing: [String: Any] = [:]) {
     let now = AudioWire.now()
     var fields = measurements.json
+    fields["passDiagnostics"] = passDiagnostics.json(at: now)
+    fields["timingObservations"] = observations.observations
     fields["reason"] = reason
     let latency = passLatency ?? readLatency()
     if playing {
@@ -224,8 +252,16 @@ public final class AudioRenderer {
     guard active, configured else { return }
     let now = AudioWire.now()
     measurements.tick(now)
-    defer { measurements.pass(AudioWire.now() - now) }
-    let context = readLatency()
+    passDiagnostics.begin(at: now)
+    defer {
+      let end = AudioWire.now()
+      measurements.pass(end - now)
+      if let pass = passDiagnostics.finish(at: end) {
+        onDiagnostic?(generation, end, ISO8601DateFormatter().string(from: Date()),
+          ["diagnosticKind": "slowRendererPass", "pass": pass, "clockOffsetMs": offset * 1000])
+      }
+    }
+    let context = measured("latencyRead") { readLatency() }
     passLatency = context
     defer { passLatency = nil }
     let hostNow = now + offset
@@ -268,7 +304,8 @@ public final class AudioRenderer {
       reportIfDue(now)
       return
     }
-    let timing = readTiming(context)
+    let timing = measured("timestampRead") { readTiming(context) }
+    measured("observationRead") { observeTiming(timing, at: now) }
     latestTiming = timing
     errorMs = timing.error.map { $0 * 1000 }
     // Starvation is independent of timestamp-error confirmation.
@@ -288,7 +325,7 @@ public final class AudioRenderer {
       return
     }
     if let error = error {
-      speed.rate = abs(error) > 0.050 ? 1 : PlaybackPolicy.rate(error: error)
+      measured("rateChange") { speed.rate = abs(error) > 0.050 ? 1 : PlaybackPolicy.rate(error: error) }
     }
     // Schedule only a short PCM horizon. The larger lead stays encoded in the jitter buffer.
     var count = 0
@@ -308,25 +345,35 @@ public final class AudioRenderer {
         consecutive = 0
       }
       do {
-        var samples = try codec!.decode(packet?.payload)
+        var samples = try measured("opusDecode") { try codec!.decode(packet?.payload) }
+        passDiagnostics.decoded()
         let first = scheduled == 0
         let last = consecutive >= PlaybackPolicy.maximumConcealedFrames
         let finalBuffer = endSequence != nil && jitter.expected == endSequence! + 1
-        if first || last || finalBuffer {
-          for i in 0..<960 {
-            let gain = Float(i) / 959
-            for c in 0..<2 { samples[i * 2 + c] *= (last || finalBuffer) ? 1 - gain : gain }
+        let buffer = measured("pcmPreparation") { () -> AVAudioPCMBuffer in
+          if first || last || finalBuffer {
+            for i in 0..<960 {
+              let gain = Float(i) / 959
+              for c in 0..<2 { samples[i * 2 + c] *= (last || finalBuffer) ? 1 - gain : gain }
+            }
           }
+          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 960)!
+          buffer.frameLength = 960
+          for i in 0..<960 {
+            buffer.floatChannelData![0][i] = samples[i * 2]
+            buffer.floatChannelData![1][i] = samples[i * 2 + 1]
+          }
+          return buffer
         }
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 960)!
-        buffer.frameLength = 960
-        for i in 0..<960 {
-          buffer.floatChannelData![0][i] = samples[i * 2]
-          buffer.floatChannelData![1][i] = samples[i * 2 + 1]
-        }
-        player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
-        if first {
-          player.play(at: AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: anchor)))
+        measured("bufferScheduling") {
+          player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+          if first {
+            player.play(at: AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: anchor)))
+            onDiagnostic?(generation, AudioWire.now(), ISO8601DateFormatter().string(from: Date()),
+              ["diagnosticKind": "playbackStarted", "presentationAnchorMacSeconds": anchorPresentation,
+               "scheduledStartHostSeconds": anchor, "clockOffsetMs": offset * 1000,
+               "passSequence": passDiagnostics.sequence])
+          }
         }
         scheduled += 960
         nextPresentation += 0.020
@@ -346,17 +393,21 @@ public final class AudioRenderer {
   private func reportIfDue(_ now: Double) {
     if now - lastStats >= 1 {
       lastStats = now
-      emit()
+      measured("statistics") { emit() }
     }
   }
   private func timingEvent(_ kind: String, timing: PlaybackTiming) {
     var fields = timing.json(scheduled: scheduled, rate: Double(speed.rate))
     fields["diagnosticKind"] = kind
+    if kind == "timingCandidateStarted" || kind == "timingCandidateSustained" {
+      fields["timingObservations"] = observations.observations
+    }
     fields["clockOffsetMs"] = offset * 1000
     onDiagnostic?(generation, AudioWire.now(), ISO8601DateFormatter().string(from: Date()), fields)
   }
   private func emit() {
     var diagnostics = measurements.json
+    diagnostics["passDiagnostics"] = passDiagnostics.json(at: AudioWire.now())
     if let timing = latestTiming {
       diagnostics.merge(timing.json(scheduled: scheduled, rate: Double(speed.rate))) { _, new in new }
     }

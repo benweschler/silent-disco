@@ -19,6 +19,8 @@ struct PlaybackTiming {
   let offset: Double
   let presentationAnchor: Double
   let latency: PlaybackLatency
+  var nodeSampleTime: Int64? = nil
+  var nodeSampleRate: Double? = nil
   var valid: Bool {
     guard let host = nodeHost, sampleTime != nil else { return false }
     return [host, sampleRate, offset, presentationAnchor].allSatisfy(\.isFinite)
