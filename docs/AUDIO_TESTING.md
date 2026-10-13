@@ -202,3 +202,8 @@ notifications provide a complementary public iOS signal, but passcode configurat
 and notification delivery affect it; do not treat their absence as proof that the
 phone stayed unlocked. Compare markers, protected-data events, lifecycle events and
 timestamp windows together.
+
+During active host runs, the fixed bottom controls expose each phone transition as
+one button. Press **Space** to mark an audible interruption once per press; held-key
+repeats do not add markers or activate a focused transition button. Space retains its
+normal behavior while typing, in dialogs, with modifier keys, and outside active runs.

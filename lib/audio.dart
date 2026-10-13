@@ -19,19 +19,29 @@ class _AudioScreenState extends State<AudioScreen> {
   StreamSubscription<dynamic>? _subscription;
   Map<String, dynamic> _state = {};
   String? _error;
+  String? _failedMethod;
   bool _offline = false;
 
   @override
   void initState() {
     super.initState();
+    FocusManager.instance.addEarlyKeyEventHandler(_markWithKeyboard);
     _subscription = _events.receiveBroadcastStream().listen(
       (event) {
         if (mounted && event is Map) {
-          setState(() => _state = Map<String, dynamic>.from(event));
+          setState(() {
+            _state = Map<String, dynamic>.from(event);
+            if (_failedMethod == null) _error = null;
+          });
         }
       },
       onError: (Object error) {
-        if (mounted) setState(() => _error = error.toString());
+        if (mounted) {
+          setState(() {
+            _error = error.toString();
+            _failedMethod = null;
+          });
+        }
       },
     );
     _call('snapshot');
@@ -40,10 +50,44 @@ class _AudioScreenState extends State<AudioScreen> {
   Future<void> _call(String method, [Map<String, dynamic>? args]) async {
     try {
       await _methods.invokeMethod<dynamic>(method, args);
-      if (mounted) setState(() => _error = null);
+      if (mounted && _failedMethod == method) {
+        setState(() {
+          _error = null;
+          _failedMethod = null;
+        });
+      }
     } on PlatformException catch (e) {
-      if (mounted) setState(() => _error = e.message ?? e.code);
+      if (mounted) {
+        setState(() {
+          _error = e.message ?? e.code;
+          _failedMethod = method;
+        });
+      }
     }
+  }
+
+  KeyEventResult _markWithKeyboard(KeyEvent event) {
+    if (!mounted ||
+        !widget.isHost ||
+        _state['active'] != true ||
+        ModalRoute.of(context)?.isCurrent != true ||
+        event.logicalKey != LogicalKeyboardKey.space) {
+      return KeyEventResult.ignored;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isAltPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isMetaPressed ||
+        keyboard.isShiftPressed) {
+      return KeyEventResult.ignored;
+    }
+    final focusContext = FocusManager.instance.primaryFocus?.context;
+    if (focusContext?.widget is EditableText ||
+        focusContext?.findAncestorWidgetOfExactType<EditableText>() != null) {
+      return KeyEventResult.ignored;
+    }
+    if (event is KeyDownEvent) _call('markAudibleInterruption');
+    return KeyEventResult.handled;
   }
 
   Future<void> _diagnostics() async {
@@ -60,6 +104,7 @@ class _AudioScreenState extends State<AudioScreen> {
 
   @override
   void dispose() {
+    FocusManager.instance.removeEarlyKeyEventHandler(_markWithKeyboard);
     _subscription?.cancel();
     _notes.dispose();
     _host.dispose();
@@ -105,40 +150,26 @@ class _AudioScreenState extends State<AudioScreen> {
                     OutlinedButton.icon(
                       onPressed: () => _call('markAudibleInterruption'),
                       icon: const Icon(Icons.flag_outlined),
-                      label: const Text('Mark audible interruption'),
+                      label: Text(
+                        widget.isHost
+                            ? 'Mark audible interruption (Space)'
+                            : 'Mark audible interruption',
+                      ),
                     ),
                     if (widget.isHost)
-                      PopupMenuButton<String>(
-                        tooltip: 'Record an approximate phone transition',
-                        onSelected: (marker) =>
-                            _call('markTestTransition', {'marker': marker}),
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(
-                            value: 'background',
-                            child: Text('Background app'),
-                          ),
-                          PopupMenuItem(
-                            value: 'foreground',
-                            child: Text('Return to app'),
-                          ),
-                          PopupMenuItem(
-                            value: 'lock',
-                            child: Text('Lock phone'),
-                          ),
-                          PopupMenuItem(
-                            value: 'wakeLocked',
-                            child: Text('Wake screen while locked'),
-                          ),
-                          PopupMenuItem(
-                            value: 'unlock',
-                            child: Text('Unlock phone'),
-                          ),
-                        ],
-                        child: const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: Text('Mark phone transition ▾'),
+                      for (final marker in const {
+                        'background': 'Background app',
+                        'foreground': 'Return to app',
+                        'lock': 'Lock phone',
+                        'wakeLocked': 'Wake screen while locked',
+                        'unlock': 'Unlock phone',
+                      }.entries)
+                        OutlinedButton(
+                          onPressed: () => _call('markTestTransition', {
+                            'marker': marker.key,
+                          }),
+                          child: Text(marker.value),
                         ),
-                      ),
                   ],
                 ),
               ),

@@ -118,4 +118,50 @@ void main() {
     expect(calls.last.method, 'exportReport');
     await tester.pumpWidget(const SizedBox());
   });
+  testWidgets(
+    'Space marks once and does not activate the focused transition button',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(home: AudioScreen(isHost: true)),
+      );
+      await emit(tester, {'hosting': true, 'active': true});
+      final lock = find.widgetWithText(OutlinedButton, 'Lock phone');
+      await tester.tap(lock);
+      expect(calls.last.method, 'markTestTransition');
+      expect(calls.last.arguments, {'marker': 'lock'});
+      Focus.of(tester.element(find.text('Lock phone'))).requestFocus();
+      await tester.pump();
+      final before = calls.length;
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.space);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.space);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.space);
+      await tester.pump();
+      expect(calls.skip(before).map((c) => c.method).toList(), [
+        'markAudibleInterruption',
+      ]);
+      await emit(tester, {'hosting': true, 'active': false});
+      final stopped = calls.length;
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      expect(calls.length, stopped);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  testWidgets('Space remains available to modal text entry', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: AudioScreen(isHost: true)));
+    await emit(tester, {'active': true});
+    final screen = tester.element(find.byType(AudioScreen));
+    unawaited(
+      showDialog<void>(
+        context: screen,
+        builder: (_) => const AlertDialog(content: TextField(autofocus: true)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final before = calls.length;
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    expect(calls.length, before);
+    Navigator.of(screen).pop();
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox());
+  });
 }
