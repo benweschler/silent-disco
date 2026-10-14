@@ -14,7 +14,7 @@ TCP uses newline-delimited UTF-8 JSON, max 16,384 bytes, with mandatory string `
 Split/coalesced reads are supported; malformed/oversize frames close the connection.
 Unknown types are ignored. Integers that identify generations travel as decimal strings.
 
-- `hello(version=1,name)` → `welcome(version=1,token,udpPort)`; token is 16 random UUID bytes in base64.
+- `hello(version=1,name,maxLeadMs=1250 optional)` → `welcome(version=1,token,udpPort)`; token is 16 random UUID bytes in base64.
 - Client resolves UDP against the actual TCP peer IP, sends registration each second until
   acknowledgment, then `ready`. Host validates the token and matching TCP peer IP.
 - `listen(enabled)` toggles delivery for that listener. A late listener receives stream configuration.
@@ -23,7 +23,7 @@ Unknown types are ignored. Integers that identify generations travel as decimal 
   use the median offset of the five lowest-RTT samples. Require four samples. Refresh every
   two seconds after startup; expire the estimate after ten seconds without a valid reply.
 - `stream(generation,anchor,lead,lookahead,rate=48000,frames=960,channels=2,codec=opus,source)`.
-  Anchor is the Mac monotonic presentation time for source sample zero. Lead is 0.5/0.75/1.0 seconds.
+  Anchor is the Mac monotonic presentation time for source sample zero. Lead is 0.5/0.75/1.0/1.25 seconds; default 1.25.
 - `stop(generation,lastSequence)` marks the final frame (no PLC after end-of-stream), drains lead+150 ms, stops the renderer and returns final `stats`.
 - `audibleIssue` records a listener-reported audible interruption separately from measured counters.
 - `stats(generation,stats,final)` once/second and at stop; `heartbeat` every second.
@@ -63,12 +63,39 @@ buffers and resamples with AVAudioConverter. No entire-file PCM allocation or Da
 The encode queue has two pending transport deliveries maximum. Each peer has at most four
 pending UDP sends and eight pending TCP writes. Scheduling emits the current frame only;
 expired frames are skipped. Encoded jitter storage is capped at 100 packets/two seconds;
-only approximately 100 ms of PCM is scheduled ahead of rendering.
+the mailbox and admitted jitter store share that 100-packet budget. Packet wakes are
+coalesced. PCM refilling targets 250 ms of consumption headroom with a 300 ms cap,
+at most six frames / 5 ms per scheduling pass. Absent packets wait until the
+20 ms consumption guard before PLC; available packets can be decoded earlier.
 
-Output scheduling subtracts AVAudioIONode.presentationLatency once. Reported AVAudioSession
-outputLatency is diagnostic only and is not added again. Playback uses a bounded ±0.1%
-varispeed correction. Above 50 ms estimated error, fade 20 ms and rejoin the current timeline.
-Six consecutive missing frames use PLC (120 ms); fade the last frame and rebuffer.
+Output scheduling subtracts the full player.outputPresentationLatency once. Hardware
+latency and I/O duration are diagnostic values, not additional delays. A dedicated
+serial control queue owns graph lifecycle and latency reads; scheduler operations
+use epoch-validated immutable snapshots. The scheduler relinquishes its graph lease
+before control work replaces/stops a graph. Reads refresh at startup, after a graph
+rebuild, and every second. Invalid refreshes retain the last valid current-epoch value;
+values older than three seconds suspend timing correction without blocking refill.
+
+The source anchor is the wire anchor minus codec lookahead; it stays fixed across
+local playback epochs. Player source-sample bases distinguish their local zero points.
+Stable output uses bounded ±0.1% varispeed correction. Output progress >2% from nominal
+over >=200 ms or a discontinuity suspends raw phase resets; >=500 ms within 0.5%
+reacquires stability. Stable phase error above 50 ms for 200 ms permits one controlled
+20 ms fade/rejoin. An unresolved transition/observation failure permits one attempt
+after three seconds. The latch survives local restarts until stable phase is within
+50 ms for 500 ms. This is a render-time policy, not an acoustic synchronization claim.
+
+Six consecutive missing frames use PLC (120 ms); the final frame fades and the player
+rejoins after it drains. Local recovery retains future encoded packets and the
+committed sequence boundary, so a late packet cannot replace already decoded/PLC
+content. New generations and explicit shutdown clear encoded storage.
+
+`maxLeadMs` is optional in hello; absence/invalid values mean the legacy 1000 ms
+maximum. The new listener advertises 1250. Starting a run is rejected if an already
+ready, listening peer cannot support the selected lead. Late incompatible peers
+remain connected but receive neither stream configuration nor media; the host row
+explains the incompatibility. Lead changes require a new run. UDP format and protocol
+version stay unchanged; older hosts ignore the extra hello field.
 
 Snapshots travel over `silent_disco/audio/events`; commands over `silent_disco/audio`:
 selectMode, snapshot, startHost, stopHost, browse, connect, disconnect, setSource, pickFile,
@@ -89,7 +116,7 @@ packets are unchanged. See AUDIO_TESTING.md for diagnostic field interpretation.
 
 Timing diagnostics additionally distinguish full `pipelineLatencyMs` from hardware
 `outputLatencyMs`, preserve hardware-only versus corrected timing errors, and record
-sustained-error candidate transitions. These are additive schema-2/protocol-1 fields.
+timing-state transitions and compact output-clock summaries. These are additive schema-2/protocol-1 fields.
 
 On foreground return the listener replaces a connection with more than five seconds
 of receive silence and bypasses reconnect backoff for that attempt. Host selection
@@ -104,17 +131,19 @@ five seconds. No additional wire messages or protocol version changes are requir
 wall times. `lastSchedulingPassMs` remains the previous completed pass duration.
 Stage maxima distinguish single-call and whole-pass maxima; counts, decoded frames,
 slow passes and suppressed slow events survive playback resets and reset on a new
-stream generation. Stages cover latency/timestamp/observation reads, rate changes,
-Opus decoding, PCM preparation, scheduling/play, and statistics. These measure wall
+stream generation. Stages cover timestamp/observation reads, rate changes, Opus decoding, PCM preparation,
+scheduling/play and playback stops. Latency getter measurements are isolated in
+`latencySnapshot`, not renderer pass timing. These measure wall
 time, including thread descheduling; they are not CPU-time measurements.
 `slowRendererPass` (>20 ms) is emitted at most once per second.
 
 `timingObservations` contains up to 16 native observations at 100 ms spacing:
 paired player/node timestamps, separately observed output-node timestamps, rates,
 clock offset, pipeline latency, queued samples and timing error. Null means invalid
-or unavailable. Windows accompany candidate start/sustained and playback reset
-events. `playbackStarted` records the Mac presentation anchor and scheduled host
-start time, including restarts. Output-node timestamps are observational only.
+or unavailable. Windows accompany playback resets. `timingStateChanged` includes compact output
+clock summaries even when larger windows are trimmed. `playbackStarted` records the
+fixed source anchor, local source-sample base and scheduled host start. Output-node
+deltas classify timing confidence and estimate consumption rate, never acoustic delay.
 
 Before omitting events to fit the 16 KB frame limit, serialization removes oldest
 observations. Per-event and frame `observationOmissions` count removed observation
@@ -155,3 +184,14 @@ Audio-session readiness and playing renderer statistics clear only their respect
 faults. Successful retry clears its own command error; unrelated commands do not.
 Explicit stop-host/disconnect clears faults for the stopped subsystem. Reports'
 `renderError` contains audio-session/renderer failures, not discovery/command errors.
+
+### Policy and build provenance
+
+Listener and host `buildInfo` include diagnostic policy version 3, Git revision (with
+a dirty marker), and a SHA-256 fingerprint of native AudioCore source. Runner build
+phases generate `SilentDiscoAudioBuild.json` into the app bundle; source files are not
+modified. Missing bundle metadata is reported as unknown, including Swift package
+tests. The opt-in `SDAudioLatencyProbe` launch setting or `SD_AUDIO_LATENCY_PROBE=1`
+environment variable reproduces the old query cadence on the isolated control queue.
+Its report flag must be false for acceptance. See AUDIO_TESTING.md for getter
+signposts, field interpretation, physical acceptance and limitations.

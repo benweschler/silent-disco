@@ -175,6 +175,7 @@
 				97C146EC1CF9000F007C117D /* Resources */,
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
+				A0D100000000000000000010 /* Audio Build Provenance */,
 			);
 			buildRules = (
 			);
@@ -285,6 +286,18 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "/bin/sh \"$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh\" build";
+		};
+		A0D100000000000000000010 /* Audio Build Provenance */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ("$(SRCROOT)/../scripts/audio_build_info.sh", "$(SRCROOT)/../NativeAudio/Sources/AudioCore", "$(SRCROOT)/../.git");
+			name = "Audio Build Provenance";
+			outputPaths = ("$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/SilentDiscoAudioBuild.json");
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"$SRCROOT/../scripts/audio_build_info.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

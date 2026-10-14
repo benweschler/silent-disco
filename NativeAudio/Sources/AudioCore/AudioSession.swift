@@ -8,6 +8,8 @@ private final class AudioPeer {
   var token = Data()
   var framer = AudioFramer()
   var name = "Listener"
+  var maxLeadMs = 1000
+  var compatibilityError = ""
   var hello = false
   var ready = false
   var wants = false
@@ -32,6 +34,8 @@ private final class AudioPeer {
     [
       "id": id, "name": name, "ready": ready, "listening": wants, "submitted": submitted,
       "sendErrors": sendErrors, "queueDrops": dropped, "stats": stats, "finalCounters": final,
+      "maxLeadMs": maxLeadMs, "compatibilityError": compatibilityError,
+      "excluded": !compatibilityError.isEmpty,
       "networkMissing": final
         ? max(0, submitted - (stats["received"] as? Int ?? 0)) as Any : NSNull(),
     ]
@@ -154,7 +158,7 @@ public final class AudioSession {
   private var anchor = 0.0
   private var started = 0.0
   private var startedDate = ""
-  private var lead = 0.5
+  private var lead = Double(AudioLeadPolicy.defaultMs) / 1000
   private var lookahead = 312
   private var source: AudioSource.Kind = .clicks
   private var fileURL: URL?
@@ -182,7 +186,9 @@ public final class AudioSession {
     return ["configuration": configuration,
       "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
       "appBuild": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
-      "os": ProcessInfo.processInfo.operatingSystemVersionString]
+      "os": ProcessInfo.processInfo.operatingSystemVersionString,
+      "buildRevision": AudioBuildInfo.revision, "sourceFingerprint": AudioBuildInfo.fingerprint,
+      "diagnosticPolicyVersion": AudioBuildInfo.policyVersion]
   }()
   private var senderWork = [String: Any]()
   private var senderDelivery = SenderDiagnostics()
@@ -381,12 +387,18 @@ public final class AudioSession {
       sourceName = fileURL!.lastPathComponent
     case "setBuffer":
       guard isHost, !active, !draining, let ms = args["milliseconds"] as? Int,
-        [500, 750, 1000].contains(ms)
-      else { throw AudioFailure("Choose 500, 750 or 1000 ms before starting") }
+        AudioLeadPolicy.choices.contains(ms)
+      else { throw AudioFailure("Choose 500, 750, 1000 or 1250 ms before starting") }
       lead = Double(ms) / 1000
+      for p in peers.values { updateCompatibility(p) }
     case "startStream":
       guard isHost, listener != nil, !active, !draining else {
         throw AudioFailure("Start the host and stop any current run first")
+      }
+      let incompatible = peers.values.filter { $0.ready && $0.wants && !supportsLead($0) }
+      guard incompatible.isEmpty else {
+        throw AudioFailure("Update incompatible listeners or lower the shared lead before starting: "
+          + incompatible.map(\.name).sorted().joined(separator: ", "))
       }
       notes = String((args["notes"] as? String ?? "").prefix(2000))
       offline = args["offlineConfirmed"] as? Bool ?? false
@@ -589,7 +601,8 @@ public final class AudioSession {
         self.errors.clear(.connection)
         if !self.isHost {
           self.send(
-            ["type": "hello", "version": 1, "name": ProcessInfo.processInfo.hostName], to: p)
+            ["type": "hello", "version": 1, "name": ProcessInfo.processInfo.hostName,
+             "maxLeadMs": AudioLeadPolicy.defaultMs], to: p)
         }
         self.receiveTCP(p)
       case .failed(let e): self.drop(p, "Connection failed: \(e)")
@@ -659,6 +672,8 @@ public final class AudioSession {
         throw AudioFailure("Unsupported audio protocol")
       }
       p.hello = true
+      p.maxLeadMs = AudioLeadPolicy.maximum(m["maxLeadMs"] as? Int)
+      updateCompatibility(p)
       p.name = String((m["name"] as? String ?? "Listener").prefix(80))
       send(
         [
@@ -691,10 +706,10 @@ public final class AudioSession {
     case "ready" where isHost:
       guard p.hello, p.udp != nil else { throw AudioFailure("UDP not registered") }
       p.ready = true
-      if active && anchor > 0 { send(configuration(), to: p) }
+      if active && anchor > 0 { sendConfiguration(to: p) }
     case "listen" where isHost:
       p.wants = m["enabled"] as? Bool ?? false
-      if active && anchor > 0 && p.ready { send(configuration(), to: p) }
+      if active && anchor > 0 && p.ready { sendConfiguration(to: p) }
     case "clock" where isHost:
       guard p.hello, let id = m["id"] as? String, let t1 = m["t1"] as? Double, t1.isFinite else {
         return
@@ -712,7 +727,7 @@ public final class AudioSession {
       guard p.ready, let raw = m["generation"] as? String, let generation = UInt64(raw),
         generation > 0,
         let a = m["anchor"] as? Double, a.isFinite, let l = m["lead"] as? Double,
-        [0.5, 0.75, 1.0].contains(l),
+        AudioLeadPolicy.choices.map({ Double($0) / 1000 }).contains(l),
         let pre = m["lookahead"] as? Int, pre >= 0, pre < 960,
         m["rate"] as? Int == 48000, m["frames"] as? Int == 960
       else { throw AudioFailure("Invalid stream configuration") }
@@ -790,6 +805,18 @@ public final class AudioSession {
     default: break
     }
   }
+  private func supportsLead(_ p: AudioPeer) -> Bool {
+    AudioLeadPolicy.supports(lead, maximum: p.maxLeadMs)
+  }
+  private func updateCompatibility(_ p: AudioPeer) {
+    p.compatibilityError = supportsLead(p) ? ""
+      : "This listener supports up to \(p.maxLeadMs) ms. Update it or lower the shared lead before the next run."
+  }
+  private func sendConfiguration(to p: AudioPeer) {
+    updateCompatibility(p)
+    guard supportsLead(p) else { publish(); return }
+    send(configuration(), to: p)
+  }
   private func configuration() -> [String: Any] {
     [
       "type": "stream", "generation": String(stream), "anchor": anchor, "lead": lead,
@@ -815,6 +842,7 @@ public final class AudioSession {
   }
   private func receiveUDP(_ c: NWConnection, peer: AudioPeer?) {
     c.receiveMessage { [weak self, weak c, weak peer] data, _, _, error in
+      let callbackAt = AudioWire.now()
       guard let self = self, let c = c else { return }
       guard
         self.isHost
@@ -860,12 +888,12 @@ public final class AudioSession {
             if abs(packet.presentation - expected) < 0.00001 {
               if self.seen.insert(packet.sequence).inserted {
                 self.received += 1
-                self.gaps.arrival(AudioWire.now())
+                self.gaps.arrival(callbackAt)
                 if self.gaps.lastGap > 0.1 {
                   self.recordDiagnostic("receiveGap", args: ["gapMs": self.gaps.lastGap * 1000])
                   self.log("Receive gap: \(Int(self.gaps.lastGap*1000)) ms")
                 }
-                if self.rendererRunning { self.renderer.receive(packet) }
+                if self.rendererRunning { self.renderer.receive(packet, callbackAt: callbackAt) }
               } else {
                 self.duplicates += 1
               }
@@ -910,7 +938,7 @@ public final class AudioSession {
         guard let self = self, self.active, self.stream == generation else { return }
         self.anchor = a
         self.lookahead = pre
-        for p in Array(self.peers.values) where p.ready { self.send(self.configuration(), to: p) }
+        for p in Array(self.peers.values) where p.ready { self.sendConfiguration(to: p) }
         self.publish()
       }
     }
@@ -932,7 +960,7 @@ public final class AudioSession {
         self.lastSequence = sequence
         self.senderDelivery.record("sendSlotLateness", seconds: AudioWire.now()
           - (presentation + Double(self.lookahead) / 48000 - self.lead))
-        for p in Array(self.peers.values) where p.ready && p.wants {
+        for p in Array(self.peers.values) where p.ready && p.wants && self.supportsLead(p) {
           guard let c = p.udp, p.pendingUDP < 4, presentation > AudioWire.now() else {
             p.dropped += 1
             continue
@@ -988,9 +1016,10 @@ public final class AudioSession {
   private func makeReport(_ reason: String) {
     let rows = endedPeers + peers.values.map(\.row)
     let completed = reason == "completed" || reason == "stopped by user"
-    let allFinal = !rows.isEmpty && rows.allSatisfy { $0["finalCounters"] as? Bool == true }
+    let participating = rows.filter { $0["excluded"] as? Bool != true }
+    let allFinal = !participating.isEmpty && participating.allSatisfy { $0["finalCounters"] as? Bool == true }
     var review = !allFinal || skipped > 0 || audibleReports > 0
-    for row in rows {
+    for row in participating {
       let s = row["stats"] as? [String: Any] ?? [:]
       for key in ["underruns", "rebufferEvents", "latePackets", "missingAtDeadline"] {
         if (s[key] as? Int ?? 0) > 0 { review = true }
@@ -1019,7 +1048,7 @@ public final class AudioSession {
       "completeCounters": allFinal,
       "notes": notes, "offlineSetupUserConfirmed": offline, "events": events,
       "testMarkers": testMarkers, "testMarkerRetentionOverflow": testMarkerOverflow,
-      "os": ProcessInfo.processInfo.operatingSystemVersionString,
+      "os": ProcessInfo.processInfo.operatingSystemVersionString, "buildInfo": buildInfo,
     ]
     latestReport = report
     onReport?(report)
@@ -1088,7 +1117,7 @@ public final class AudioSession {
         renderAllowed = false
       #endif
     }
-    renderer.stop { [weak self] in
+    renderer.stop(preservePackets: !deactivate) { [weak self] in
       guard deactivate else { return }
       self?.queue.async { [weak self] in
         guard let self = self, !self.rendererRunning, !self.wants || !self.active else { return }
@@ -1101,7 +1130,8 @@ public final class AudioSession {
       !rendererRunning
     else { return }
     rendererRunning = true
-    renderer.start(generation: stream, offset: clock.offset)
+    renderer.start(generation: stream, offset: clock.offset,
+      sourceAnchor: anchor - Double(lookahead) / 48000)
   }
   private func clientStats() -> [String: Any] {
     var s = lastStats

@@ -69,6 +69,47 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+  testWidgets('Host offers 1250 ms and explains incompatible listeners', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: AudioScreen(isHost: true)));
+    await emit(tester, {
+      'hosting': true,
+      'bufferMs': 1250,
+      'listeners': [
+        {
+          'name': 'Older phone',
+          'ready': true,
+          'listening': true,
+          'compatibilityError':
+              'Update this listener or lower the shared lead.',
+          'stats': {},
+        },
+      ],
+    });
+    await tester.scrollUntilVisible(
+      find.text('1250 ms'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('1250 ms'), findsOneWidget);
+    await tester.tap(find.text('1250 ms'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('1000 ms').last);
+    await tester.pumpAndSettle();
+    expect(calls.last.method, 'setBuffer');
+    expect(calls.last.arguments, {'milliseconds': 1000});
+    await tester.scrollUntilVisible(
+      find.text('Update this listener or lower the shared lead.'),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(
+      find.text('Update this listener or lower the shared lead.'),
+      findsOneWidget,
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
   testWidgets('Phone gates listening on ready and exposes stop and route', (
     tester,
   ) async {

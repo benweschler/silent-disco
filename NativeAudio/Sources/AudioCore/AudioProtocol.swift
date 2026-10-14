@@ -155,9 +155,24 @@ public struct AudioJitterBuffer {
   public private(set) var late = 0
   public private(set) var expected: UInt64?
   public let capacity = 100
+  public private(set) var lateAfterConcealment = 0
+  public private(set) var maximumReorderDepth = 0
+  private var highestSequence: UInt64?
+  private var concealedSequences = Set<UInt64>()
+  private var committedThrough: UInt64?
   public init() {}
-  public mutating func insert(_ p: AudioPacket, hostNow: Double, outputLead: Double) {
-    guard p.presentation > hostNow + outputLead else {
+  public mutating func insert(_ p: AudioPacket, hostNow: Double, outputLead: Double,
+    enforcePresentationDeadline: Bool = true) {
+    if concealedSequences.remove(p.sequence) != nil { lateAfterConcealment += 1 }
+    if let highest = highestSequence, p.sequence < highest {
+      maximumReorderDepth = max(maximumReorderDepth, Int(min(30000, highest - p.sequence)))
+    }
+    highestSequence = max(highestSequence ?? p.sequence, p.sequence)
+    if let committed = committedThrough, p.sequence <= committed {
+      late += 1
+      return
+    }
+    guard !enforcePresentationDeadline || p.presentation > hostNow + outputLead else {
       late += 1
       return
     }
@@ -182,8 +197,24 @@ public struct AudioJitterBuffer {
   public mutating func take() -> AudioPacket? {
     guard let n = expected else { return nil }
     expected = n + 1
+    committedThrough = max(committedThrough ?? n, n)
     return packets.removeValue(forKey: n)
   }
+  public var nextPacket: AudioPacket? { expected.flatMap { packets[$0] } }
+  public var contiguousPackets: Int {
+    guard var n = expected ?? first?.sequence else { return 0 }
+    var count = 0
+    while packets[n] != nil && count < capacity { count += 1; n += 1 }
+    return count
+  }
+  public mutating func markConcealed(_ sequence: UInt64) {
+    concealedSequences.insert(sequence)
+    if concealedSequences.count > 100, let first = concealedSequences.min() {
+      concealedSequences.remove(first)
+    }
+  }
+  /// A local playback restart leaves future encoded packets available for rejoining.
+  public mutating func rejoin() { expected = nil }
   public mutating func discard(before hostTime: Double) {
     let previousCount = packets.count
     packets = packets.filter { $0.value.presentation > hostTime }

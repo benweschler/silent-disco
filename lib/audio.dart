@@ -234,12 +234,12 @@ class _AudioScreenState extends State<AudioScreen> {
                 _row('Selected', _state['source']),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<int>(
-                  key: ValueKey(_state['bufferMs'] ?? 500),
-                  initialValue: (_state['bufferMs'] as num? ?? 500).toInt(),
+                  key: ValueKey(_state['bufferMs'] ?? 1250),
+                  initialValue: (_state['bufferMs'] as num? ?? 1250).toInt(),
                   decoration: const InputDecoration(
                     labelText: 'Shared presentation lead',
                   ),
-                  items: [500, 750, 1000]
+                  items: [500, 750, 1000, 1250]
                       .map(
                         (ms) =>
                             DropdownMenuItem(value: ms, child: Text('$ms ms')),
@@ -313,6 +313,14 @@ class _AudioScreenState extends State<AudioScreen> {
                         Text(
                           '${raw['listening'] == true ? 'Listening' : 'Connected'} · UDP ${raw['ready'] == true ? 'ready' : 'pending'}\nPackets sent ${raw['submitted']} · queue drops ${raw['queueDrops']}',
                         ),
+                        if ((raw['compatibilityError'] as String? ?? '')
+                            .isNotEmpty)
+                          Text(
+                            raw['compatibilityError'] as String,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
                         const SizedBox(height: 8),
                         SizedBox(
                           height: 180,

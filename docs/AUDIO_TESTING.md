@@ -29,7 +29,7 @@ optional; follow OFFLINE_LAN_SETUP.md only when retiring the setup.
 3. Initially keep Mac Bluetooth off. Connect headphones to the iPhone. Start at low volume.
 4. Mac: **Start audio host**. Phone: **Find audio hubs / retry**, **Connect**, then **Listen**.
 5. Mac: choose click track/test tone or a local unprotected music file. Leave the
-   shared presentation lead at 500 ms; add notes and offline confirmation, then **Start audio**.
+   shared presentation lead at 1250 ms; add notes and offline confirmation, then **Start audio**.
 6. Verify a short speaker check and a short headphone check. The host has no local monitor.
 7. Run one ten-minute music test mostly with the phone locked. Files loop; native sending
    stops after 600 seconds. Stop Audio finishes queued playback and saves a report.
@@ -77,8 +77,10 @@ A network gap can be absorbed by buffering; packet-loss concealment may hide a m
 Conversely a Bluetooth dropout may occur after audio leaves our engine and evade our counters.
 The report's timing error is a render/clock estimate, **not acoustic synchronization**.
 
-Try 750 or 1000 ms lead if needed. The lead also covers reported output latency and the
-short PCM scheduling horizon; it is not all available as network jitter tolerance.
+The default shared lead is 1250 ms; 500/750/1000 ms remain available for better networks.
+The lead also covers pipeline latency, codec lookahead, and the 20 ms scheduling guard.
+Already available packets may be decoded ahead; absent packets wait until that guard.
+The PCM refill target does not itself force early loss decisions.
 Bluetooth coexistence on the Mac remains a later controlled comparison. Prefer a 5 GHz
 hotspot channel if offered; record channel/band and headphone models in the notes.
 
@@ -86,79 +88,103 @@ Two-phone acoustic skew (target 20–30 ms) remains pending: capture simultaneou
 outputs on one recording timebase. Simulated clients do not substitute for this test.
 USB capture, Mac DJ monitoring, three channels and ten-person capacity are not included.
 
-## Background-playback diagnostic run (report schema 2)
+## Policy 3: listener scheduling and timing acceptance
 
-Rebuild/install both apps once after this native-code update; hot reload does not
-load Swift changes. Use the same music file with a 500 ms shared presentation lead:
+Rebuild **both** apps and install a signed Release iPhone build. Hot reload cannot
+load these native changes. Run without a debugger and leave the optional latency
+probe off for acceptance. Reports include `buildInfo.buildRevision`, the native
+`sourceFingerprint`, and `diagnosticPolicyVersion: 3`. Xcode creates the provenance
+resource on every Runner build; package tests explicitly report unknown provenance.
 
-1. Listen through AirPods with the app foregrounded for 30 seconds.
-2. Background the app for 30 seconds.
-3. Return, then lock the phone with its screen off for 30 seconds.
-4. Wake the screen but leave the phone locked for 30 seconds.
-5. Stop audio on the Mac, wait for report collection, and export the report.
+Use the same music and AirPods on the Mac-hosted LAN at **1250 ms**. Start with
+30 seconds foregrounded and 30 seconds backgrounded, return, then perform repeated
+lock / wake-screen-while-locked / unlock cycles. Follow with a ten-minute mixed run.
+On the Mac each transition is a single-click button. Space marks one audible
+interruption per press; repeats do not trigger additional actions. Typing, dialogs,
+modifier-key combinations, and inactive runs retain normal keyboard behavior.
+Stop on the Mac and wait for final statistics before inspecting the saved report.
 
-Record approximate transition times and audible behavior. Lock/screen state is
-user-reported; native notifications record app active/inactive/background state.
-Inspect this report before requesting another run. Repeat through the speaker only
-if the first report leaves the cause unclear. This update adds evidence, not a fix.
+Acceptance requires zero marked audible interruptions, no latency-read-induced
+scheduler starvation, no premature PLC for packets delivered within the available
+budget, and no repeated timing-recovery loops. Fewer resets alone are not success.
+Two-listener acoustic skew must separately meet the 20–30 ms target on a shared
+recording timebase, including transitions and recovery. Reports remain explicitly
+`acousticSynchronization: unverified`; software estimates cannot certify that target.
 
-Each listener has `stats.rendererDiagnostics` (timer intervals, scheduling-pass
-and packet-queue delays) and `stats.diagnostics` (structured event history).
-`playbackReset` snapshots are taken before fading/clearing playback. They include
-actual timing error, player sample time, clock offset adjustment, output latency
-change, compressed-buffer depth, scheduled samples, next deadline, and
-`estimatedPlayableAudioMs`. That estimate uses scheduled minus rendered audio,
-adjusted for playback rate; it is null when player timing is unavailable and is
-not a measurement of audio heard at the headphones. `rendererStopped` records
-normal stop or lifecycle-driven renderer cleanup separately from failure resets.
+If app scheduling is healthy but delivery exceeds budget, compare the same test on
+ordinary Wi-Fi. If only Bluetooth shows the timing excursions, compare speaker output
+and collect simultaneous acoustic/timestamp evidence before changing compensation.
+Do not infer that either LAN hardware or Bluetooth is inherently incapable from a
+receive gap or a timestamp excursion alone. Physical acceptance is still pending.
 
-Events carry generation, sequence, UTC time, local monotonic time, captured clock
-offset and `streamSeconds` relative to the Mac presentation anchor. Negative
-stream time is possible before the presentation anchor. Lifecycle events capture
-time at notification receipt; their clock offset is sampled on the session queue.
-Renderer reset offsets are captured on the renderer queue. Stream-start events
-include app state; route, interruption, activation and receive-gap events help
-correlate transitions with failures. Renderer counters persist through resets but
-restart for a new stream generation.
+### Latency getter attribution
 
-The phone retains 32 events and transmits its latest eight with existing statistics.
-The Mac deduplicates and retains 256 events per listener. `retentionOverflow`,
-`hostRetentionOverflow`, `transportOmissions` and `observedSequenceGaps` expose
-incomplete evidence. Transport omissions count removed event copies, including
-repeated copies across snapshots. Stats keep the existing 16 KB control-frame limit.
-Old schema-1 reports remain readable; the audio protocol stays at version 1.
+`rendererDiagnostics.latencySnapshot` records graph epoch, query start/completion,
+age, values, validity and per-getter aggregates. The measured names are
+`sessionLookup` and `ioBufferDuration` (iOS), `outputNodeLookup`, `presentationLatency`,
+and `outputPresentationLatency`. Counts, maxima and threshold exceedances accompany
+up to four recent slow reads with call site and epoch. Values are wall time, not CPU
+time; a long call can include thread descheduling. Getter aggregates are graph-scoped.
+Snapshots older than three seconds disable timing correction while current-graph
+playback keeps refilling from the last valid snapshot. New graphs need a valid snapshot.
 
-Timer delays plus exhausted playable audio suggest scheduling starvation. Resets
-with adequate playable audio suggest clock/player/latency calculation issues.
-Do not change scheduling horizon, reset threshold or codec until the evidence
-supports that change. No full-app or repeated socket tests are needed for this
-instrumentation; physical lock/background behavior is validated by the user.
+For a targeted attribution run only, enable the launch argument
+`-SDAudioLatencyProbe YES` in the iOS scheme, or `SD_AUDIO_LATENCY_PROBE=1` in the
+process environment. This invokes the former 200 Hz tick + 50 Hz packet query cadence
+on the **isolated control queue**, never on the scheduler. It deliberately adds
+load; `latencyProbeEnabled` marks its reports. Disable the argument/environment
+(or use `-SDAudioLatencyProbe NO`) before acceptance runs. This reproduces query
+cadence, not the old queue placement, and need not reproduce every old stall.
 
-## Lock-related timing correction
+In Instruments System Trace, correlate the `dev.silentdisco.audio` / `Latency`
+`Latency getter` signposts with thread states, scheduler gaps and render progress.
+The signposts name the property, call site and graph epoch. A getter's wall duration
+alone does not prove synchronous IPC or a framework lock. If monitor reads still
+stall rendering globally, investigate the shared framework wait before claiming a fix.
 
-Scheduling and timing checks now use the player's full downstream pipeline latency
-(`player.outputPresentationLatency`), not hardware latency alone. The fixed Mac
-presentation anchor is retained. `outputLatencyMs` still means hardware latency;
-`pipelineLatencyMs` and `pipelineLatencyChangeMs` describe the full pipeline.
-Do not add Bluetooth or I/O-buffer latency again. Diagnostics also include
-`hardwareOnlyTimingErrorMs`, corrected `timingErrorMs`, timestamp validity and sample
-rate, and iOS `ioBufferDurationMs`. Unavailable/non-finite observations serialize as
-null and cannot drive rate correction or a timing reset.
+### Read the new evidence
 
-A timing error must exceed 50 ms with the same sign for 200 ms of valid observations
-to trigger a reset. Recovery within threshold, a sign change, invalid timing, or
-an observation gap above 100 ms restarts confirmation. `timingCandidateStarted`,
-`timingCandidateRecovered`, `timingCandidateInvalidated`, `timingCandidateReplaced`
-and `timingCandidateSustained` record transitions. While a large error awaits
-confirmation playback rate is 1.0. Underruns and missing-audio recovery remain
-immediate; the 100 ms decoded horizon, codec and lead choices are unchanged.
+- `timingSummary`: `starting`, `stable`, `outputTransition`, `timingUnavailable`, or
+  `recovering`; compact start/end output sample-host pairs, measured slope, phase
+  error, and recovery latch. Compact summaries survive observation-window trimming.
+- `sourcePresentationAnchorMacSeconds` stays fixed for the stream (wire anchor minus
+  encoder lookahead). `sourceSampleBase`, `playbackEpoch`, and `graphEpoch` distinguish
+  local player origins from the shared source timeline. A rejoin does not erase it.
+- `estimatedPlayableAudioMs` projects queued minus consumed source samples using the
+  paired player timestamp, varispeed and observed output progression. Null means
+  unavailable, not empty. `nextConsumptionDeadlineMs` retains negative values;
+  `nextRenderingDeadlineMs` is the separate nominal source/host deadline.
+- `compressedBufferMs` counts all stored encoded packets; `contiguousEncodedMs`
+  counts usable consecutive packets. Neither is an acoustic measurement.
+- `packetAdmission` identifies the last callback, admission, sequence and remaining
+  consumption-deadline margin. `maxAdmissionDelayMs`, mailbox overflow, reorder depth,
+  and `lateAfterPLC` separate queue delay, reordering and late concealment arrivals.
+- `recoveryCounts` separates scheduler starvation, missing audio, timing recovery,
+  graph recovery and decoding failure. User marks remain independent.
+- `passDiagnostics` retains stage wall times and previous/current pass sequences.
+  Latency reads are now exclusively in `latencySnapshot`, never in scheduling stages.
+  Timer intervals measure the 5 ms fallback timer, not coalesced packet/refill wakes.
 
-After updating both apps, play the same music at 500 ms for 30 seconds in the
-foreground, then perform three lock/wake cycles through AirPods. Note audible
-interruptions and stop audio to save the report. Repeat once through the speaker
-only if needed. Physical success requires no lock-triggered interruption or reset
-loop; these code changes alone do not establish that result. If errors persist,
-inspect the report rather than increasing thresholds or declaring success.
+Raw error is not permission to reset during an output transition. More than 2%
+output-rate deviation over at least 200 ms, or a timestamp discontinuity, enters
+transition handling. Reacquisition requires 500 ms within 0.5% of nominal output
+progress. Stable residual source error over 50 ms for 200 ms permits one rejoin;
+an unresolved transition/unavailable observation episode permits one attempt after
+three seconds. The recovery latch survives restarts and clears only after 500 ms
+of stable, recovered phase. Real starvation and interruptions have independent paths.
+
+Each phone keeps 32 diagnostic events and transmits its latest eight; the host
+retains 256. Sequence gaps, retention overflow, omitted events and omitted observation
+copies expose incomplete evidence. Reports stay schema 2 and control frames stay
+within 16 KB. Older reports remain readable but use their older policy semantics.
+Protected-data notifications indicate file-protection state, not precise lock/wake
+state; Mac transition markers record approximate user actions.
+
+An older listener that omits `maxLeadMs` supports at most 1000 ms. The host refuses
+to start 1250 ms with an already listening incompatible peer. An incompatible late
+listener stays connected but receives no media/configuration for that run, with an
+explanation on its host row. Update it or choose a supported shared lead for the next
+run; listeners never independently delay the shared stream.
 
 ## Idle listener background recovery
 
@@ -175,35 +201,3 @@ enough for the Mac to remove the idle listener, then start music on the Mac.
 Reopen the phone: it should reconnect and play without another Listen tap. Repeat
 with Stop listening or Disconnect selected first; audio must not start itself.
 A manual endpoint still requires a new port if the host itself was restarted.
-
-### Investigating renderer stalls and lock-related timing drift
-
-Playback behavior is unchanged by the scheduling-stall diagnostics. First inspect
-`passDiagnostics`: the current partial pass and previous completed pass have separate
-sequence numbers. A long decode/PCM/scheduling stage identifies where wall time was
-spent; short stage execution plus long timer intervals points toward scheduling.
-Wall time includes descheduling, so expensive wall time alone does not prove CPU cost.
-Compare sender work/send lateness and both transport timers before blaming receive
-gaps on the LAN. Clean earlier runs do not support an inherent hardware limitation.
-Use the attached timestamp windows to compare player and output-node progress and
-latency/clock changes around timing candidates, while respecting playback restarts.
-
-The next physical run should use a Release iPhone build without a debugger, the same
-music file, AirPods, Mac-hosted LAN and 500 ms lead. Play foregrounded for 30 seconds,
-background for 30 seconds and return, then perform three lock/wake cycles with 15
-seconds locked and screen off each time. Mark audible disruptions, stop on the Mac,
-and inspect the report before requesting further runs. Do not change the 100 ms
-horizon, 50 ms/200 ms decision, lead choices or codec during this diagnostic step.
-
-Use the Mac's fixed **Mark phone transition** menu immediately before each phone
-action. It marks your intended action approximately, not an automatically detected
-lock. Use **Wake screen while locked** separately from **Unlock phone**. Protected-data
-notifications provide a complementary public iOS signal, but passcode configuration
-and notification delivery affect it; do not treat their absence as proof that the
-phone stayed unlocked. Compare markers, protected-data events, lifecycle events and
-timestamp windows together.
-
-During active host runs, the fixed bottom controls expose each phone transition as
-one button. Press **Space** to mark an audible interruption once per press; held-key
-repeats do not add markers or activate a focused transition button. Space retains its
-normal behavior while typing, in dialogs, with modifier keys, and outside active runs.

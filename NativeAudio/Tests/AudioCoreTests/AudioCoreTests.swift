@@ -335,7 +335,7 @@ private final class TestListener {
   func start() {
     tcp.stateUpdateHandler = { [weak self] state in
       if case .ready = state {
-        self?.send(["type": "hello", "version": 1])
+        self?.send(["type": "hello", "version": 1, "maxLeadMs": 1250])
         self?.read()
       }
     }

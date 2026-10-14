@@ -21,6 +21,7 @@ struct PlaybackTiming {
   let latency: PlaybackLatency
   var nodeSampleTime: Int64? = nil
   var nodeSampleRate: Double? = nil
+  var sourceSampleBase: Int64 = 0
   var valid: Bool {
     guard let host = nodeHost, sampleTime != nil else { return false }
     return [host, sampleRate, offset, presentationAnchor].allSatisfy(\.isFinite)
@@ -36,7 +37,7 @@ struct PlaybackTiming {
   }
   var error: Double? {
     guard let actual = actual, let elapsed = elapsed else { return nil }
-    let result = elapsed - actual
+    let result = elapsed - (Double(sourceSampleBase) / 48000 + actual)
     return result.isFinite ? result : nil
   }
   func json(scheduled: Int, rate: Double) -> [String: Any] {
@@ -45,11 +46,13 @@ struct PlaybackTiming {
     fields["playerSampleTimeValid"] = sampleTime != nil && sampleRate.isFinite && sampleRate > 0
     fields["nodeHostSeconds"] = nodeHost.flatMap { $0.isFinite ? $0 : nil } as Any? ?? NSNull()
     fields["playerSampleTime"] = sampleTime as Any? ?? NSNull()
+    fields["sourceSampleBase"] = sourceSampleBase
     fields["playerSampleRate"] = sampleRate.isFinite ? sampleRate as Any : NSNull()
     fields["expectedElapsedSeconds"] = elapsed as Any? ?? NSNull()
     fields["timingErrorMs"] = error.map { $0 * 1000 } as Any? ?? NSNull()
     fields["hardwareOnlyTimingErrorMs"] = valid && latency.hardware.isFinite
-      ? (nodeHost! + offset + latency.hardware - presentationAnchor - actual!) * 1000 as Any : NSNull()
+      ? (nodeHost! + offset + latency.hardware - presentationAnchor
+        - Double(sourceSampleBase) / 48000 - actual!) * 1000 as Any : NSNull()
     fields["estimatedPlayableAudioMs"] = RenderMeasurements.playableMs(
       scheduled: scheduled, sampleTime: valid ? sampleTime : nil, sampleRate: sampleRate,
       rate: rate) as Any? ?? NSNull()
