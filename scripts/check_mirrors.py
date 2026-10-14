@@ -8,7 +8,7 @@ if not other.is_dir():
     raise SystemExit('Pass the other app checkout as an argument to compare shared sources.')
 failures = []
 files = [p.relative_to(root) for p in (root/'NativeAudio').rglob('*') if p.is_file() and not any(x in p.parts for x in ('.build', '.swiftpm'))]
-files += [Path('lib/audio.dart'), Path('lib/diagnostics.dart'), Path('scripts/check_mirrors.py'), Path('scripts/verify_opus.py'), Path('scripts/audio_build_info.sh'), Path('docs/AUDIO_PROTOCOL.md'), Path('docs/AUDIO_TESTING.md')]
+files += [Path('lib/audio.dart'), Path('lib/diagnostics.dart'), Path('scripts/check_mirrors.py'), Path('scripts/analyze_audio_report.py'), Path('scripts/verify_opus.py'), Path('scripts/audio_build_info.sh'), Path('docs/AUDIO_PROTOCOL.md'), Path('docs/AUDIO_TESTING.md')]
 for rel in files:
     if not (other/rel).is_file() or (root/rel).read_bytes() != (other/rel).read_bytes(): failures.append(str(rel))
 a = 'macos' if (root/'macos').is_dir() else 'ios'

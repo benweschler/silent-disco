@@ -88,12 +88,12 @@ Two-phone acoustic skew (target 20–30 ms) remains pending: capture simultaneou
 outputs on one recording timebase. Simulated clients do not substitute for this test.
 USB capture, Mac DJ monitoring, three channels and ten-person capacity are not included.
 
-## Policy 3: listener scheduling and timing acceptance
+## Policy 4: listener scheduling and timing acceptance
 
 Rebuild **both** apps and install a signed Release iPhone build. Hot reload cannot
 load these native changes. Run without a debugger and leave the optional latency
 probe off for acceptance. Reports include `buildInfo.buildRevision`, the native
-`sourceFingerprint`, and `diagnosticPolicyVersion: 3`. Xcode creates the provenance
+`sourceFingerprint`, and `diagnosticPolicyVersion: 4`. Xcode creates the provenance
 resource on every Runner build; package tests explicitly report unknown provenance.
 
 Use the same music and AirPods on the Mac-hosted LAN at **1250 ms**. Start with
@@ -106,7 +106,7 @@ Stop on the Mac and wait for final statistics before inspecting the saved report
 
 Acceptance requires zero marked audible interruptions, no latency-read-induced
 scheduler starvation, no premature PLC for packets delivered within the available
-budget, and no repeated timing-recovery loops. Fewer resets alone are not success.
+budget, and zero timing-only recoveries. Fewer resets alone are not success.
 Two-listener acoustic skew must separately meet the 20–30 ms target on a shared
 recording timebase, including transitions and recovery. Reports remain explicitly
 `acousticSynchronization: unverified`; software estimates cannot certify that target.
@@ -144,9 +144,9 @@ stall rendering globally, investigate the shared framework wait before claiming 
 
 ### Read the new evidence
 
-- `timingSummary`: `starting`, `stable`, `outputTransition`, `timingUnavailable`, or
-  `recovering`; compact start/end output sample-host pairs, measured slope, phase
-  error, and recovery latch. Compact summaries survive observation-window trimming.
+- `timingSummary`: `starting`, `stable`, `outputTransition`, `timingUnavailable`;
+  compact start/end output sample-host pairs, measured slope, phase
+  error, and diagnostic episode. Compact summaries survive observation-window trimming.
 - `sourcePresentationAnchorMacSeconds` stays fixed for the stream (wire anchor minus
   encoder lookahead). `sourceSampleBase`, `playbackEpoch`, and `graphEpoch` distinguish
   local player origins from the shared source timeline. A rejoin does not erase it.
@@ -159,8 +159,8 @@ stall rendering globally, investigate the shared framework wait before claiming 
 - `packetAdmission` identifies the last callback, admission, sequence and remaining
   consumption-deadline margin. `maxAdmissionDelayMs`, mailbox overflow, reorder depth,
   and `lateAfterPLC` separate queue delay, reordering and late concealment arrivals.
-- `recoveryCounts` separates scheduler starvation, missing audio, timing recovery,
-  graph recovery and decoding failure. User marks remain independent.
+- `recoveryCounts` separates scheduler starvation, missing audio, session/graph
+  recovery and decoding failure; timing-only recovery must remain absent. User marks remain independent.
 - `passDiagnostics` retains stage wall times and previous/current pass sequences.
   Latency reads are now exclusively in `latencySnapshot`, never in scheduling stages.
   Timer intervals measure the 5 ms fallback timer, not coalesced packet/refill wakes.
@@ -168,15 +168,19 @@ stall rendering globally, investigate the shared framework wait before claiming 
 Raw error is not permission to reset during an output transition. More than 2%
 output-rate deviation over at least 200 ms, or a timestamp discontinuity, enters
 transition handling. Reacquisition requires 500 ms within 0.5% of nominal output
-progress. Stable residual source error over 50 ms for 200 ms permits one rejoin;
-an unresolved transition/unavailable observation episode permits one attempt after
-three seconds. The recovery latch survives restarts and clears only after 500 ms
-of stable, recovered phase. Real starvation and interruptions have independent paths.
+progress. Raw residual errors above 50 ms and timing uncertainty hold rate at 1 and remain
+visible without stopping the player. After three seconds an episode emits one
+`timingDegraded`; after valid fresh stable phase is within ±50 ms for 500 ms it emits
+`timingEpisodeEnded` and permits ±0.1% correction again. The source anchor never moves.
+Real starvation and interruptions still recover independently.
 
-Each phone keeps 32 diagnostic events and transmits its latest eight; the host
-retains 256. Sequence gaps, retention overflow, omitted events and omitted observation
-copies expose incomplete evidence. Reports stay schema 2 and control frames stay
-within 16 KB. Older reports remain readable but use their older policy semantics.
+Capable peers deliver events incrementally with acknowledgements and one in-flight
+batch, retaining 256 events on each side. Retries deduplicate; explicit eviction ranges
+explain evidence loss. Legacy peers keep the latest-eight snapshot behavior.
+Final counters are immutable snapshots taken before cleanup and independent of graph
+teardown. The host waits for counters and required event sequences, bounded by lead +
+five seconds. Inspect `finalization` for missing IDs and the exact unresolved stage.
+Reports remain schema 2 and frames remain within 16 KB.
 Protected-data notifications indicate file-protection state, not precise lock/wake
 state; Mac transition markers record approximate user actions.
 
@@ -201,3 +205,41 @@ enough for the Mac to remove the idle listener, then start music on the Mac.
 Reopen the phone: it should reconnect and play without another Listen tap. Repeat
 with Stop listening or Disconnect selected first; audio must not start itself.
 A manual endpoint still requires a new port if the host itself was restarted.
+
+## Policy-4 focused transition run
+
+1. Rebuild both apps in Release and install the signed phone build. Leave
+   `SDAudioLatencyProbe` and `SDAudioTrace` off. Use 1250 ms and the same music/output.
+2. Perform three lock / wake-screen-while-locked cycles and one unlock. Mark each
+   transition on the Mac and mark audible interruptions with Space. Stop and wait
+   up to 6.25 seconds for report completion.
+3. Verify zero timing-only recoveries, retained degraded/end episode summaries,
+   complete counters (or precise finalization reasons), and a lifecycle for each real
+   recovery. Run `python3 scripts/analyze_audio_report.py <report.json>` for a compact
+   separation of episodes, recoveries, PLC, stalls and user marks.
+4. Capture a short 60–90 second repeat in Instruments Audio System Trace with thread
+   states and application signposts. Profile Release without LLDB. Enable the launch
+   argument `-SDAudioTrace YES` or environment `SD_AUDIO_TRACE=1`; confirm
+   `buildInfo.traceEnabled: true`. Keep the latency-cadence probe off. Correlate
+   Pipeline `Audio operation` intervals (individual timestamp calls, scheduler stages,
+   graph stop) and Latency getter intervals with blocked/runnable thread states and
+   stacks. Wall duration and overlapping intervals alone cannot identify a shared lock.
+5. Disable tracing. Record two listeners simultaneously on one recording timebase
+   using the click signal. Measure relative delay before, during and after transitions
+   and recoveries; retain the unverified synchronization label until 20–30 ms passes.
+6. If the short run is clean, proceed to ten minutes of mixed transitions. Compare
+   ordinary Wi-Fi if delivery exceeds budget; compare speaker output if excursions
+   appear limited to Bluetooth.
+
+`timestampCalls.aggregate` gives per-call count/max/threshold counts; `slowCalls`
+retains graph/playback epochs and monotonic intervals. `recoveryTimeline` retains
+software decision-to-stop and stop-to-observed-progress intervals, never acoustic
+silence. `packetIncident` freezes PLC/gap/recovery evidence; summaries and explicit
+omission ranges survive trimming. `receiveDiagnostics` includes arm/callback/rearm
+intervals and `sessionQueueDelay`; it does not claim a device packet arrival time.
+
+The earlier batch cannot establish why each of its six final snapshots was missing.
+A deterministic blocked-control-queue test establishes that teardown-dependent final
+reporting can miss a fixed deadline; policy 4 removes that dependency and labels the
+remaining stages. Timestamp instrumentation attributes future slow calls but does
+not itself fix the observed 85 ms scheduler stall. Physical validation remains pending.

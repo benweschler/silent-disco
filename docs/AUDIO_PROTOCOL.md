@@ -78,12 +78,15 @@ values older than three seconds suspend timing correction without blocking refil
 
 The source anchor is the wire anchor minus codec lookahead; it stays fixed across
 local playback epochs. Player source-sample bases distinguish their local zero points.
-Stable output uses bounded ±0.1% varispeed correction. Output progress >2% from nominal
-over >=200 ms or a discontinuity suspends raw phase resets; >=500 ms within 0.5%
-reacquires stability. Stable phase error above 50 ms for 200 ms permits one controlled
-20 ms fade/rejoin. An unresolved transition/observation failure permits one attempt
-after three seconds. The latch survives local restarts until stable phase is within
-50 ms for 500 ms. This is a render-time policy, not an acoustic synchronization claim.
+Timing policy 4 is `observeWithoutRejoin`. Output progress >2% from nominal over
+>=200 ms or a discontinuity suspends correction; >=500 ms within 0.5% reacquires
+output stability. Correction additionally requires fresh valid observations within
+±50 ms for 500 ms. During uncertainty or larger phase errors the rate remains 1.
+No phase excursion or three-second timeout can stop/flush playback. One
+`timingDegraded` event per episode and a `timingEpisodeEnded` summary retain the raw
+phase, slope extrema, entry/exit timestamps, offset change and continuity. Actual
+starvation, decoding/session failures and graph recovery retain independent paths.
+This is a diagnostic playback policy, not an acoustic synchronization claim.
 
 Six consecutive missing frames use PLC (120 ms); the final frame fades and the player
 rejoins after it drains. Local recovery retains future encoded packets and the
@@ -106,13 +109,32 @@ route and interruption events, and always label acoustic synchronization unverif
 ## Optional diagnostic evidence
 
 Protocol version 1 statistics may include `rendererDiagnostics` and `diagnostics`.
-The latter contains up to eight recent run-scoped events with sequence numbers,
-generation, UTC/monotonic timestamps, captured clock offset and stream-relative
-time. The receiver deduplicates and accumulates evidence for schema-2 reports.
-Evidence is bounded and trimmed before serialization to the existing 16 KB frame
-limit; omission/overflow and sequence-gap counters make truncation explicit.
-Peers without these optional fields remain compatible. Playback commands and media
-packets are unchanged. See AUDIO_TESTING.md for diagnostic field interpretation.
+Legacy peers receive the latest eight events in statistics. New hello/welcome
+messages advertise optional `diagnosticDelivery: 1`. Between capable peers, stats
+carry small delivery summaries; `diagnosticBatch` sends the oldest unacknowledged
+events for a generation. Only one batch is outstanding; retries after one second
+use the same payload. `diagnosticAck.through` acknowledges the highest contiguous
+sequence. Declared `evictedThrough` ranges advance across explicitly lost evidence;
+unexplained gaps are not acknowledged. Stale generations and duplicates are ignored.
+
+Local retention is 256 events; host retention is 256. Frames remain below 16 KB.
+Oversized incident entries/observation windows are trimmed with explicit omission
+counts and ranges; counter snapshots are delivered independently. Heartbeat, clock,
+stop and final statistics are queued before diagnostic batches, which use at most
+one control slot and do not send while two other sends are pending. Reports separate
+local overflow, detailed transport omissions, retries, declared evictions and
+unexplained gaps. Schema 2, protocol 1 and UDP packet format are unchanged.
+
+After the existing lead + 150 ms media drain, the listener captures immutable final
+counters on the scheduler before destructive packet cleanup, sends them independently
+of graph teardown, and advertises `finalDiagnosticSequence`. Duplicate stop requests
+are ignored. The host never replaces a final counter snapshot with ordinary or
+repeated final statistics. Diagnostic evidence continues accumulating separately.
+Participant IDs are retained from stream configuration (ready, listening, compatible
+listeners), including disconnects and late joins. Excluded listeners are not participants.
+The host finalizes once all participants have final counters and required diagnostic
+sequences, or at lead + five seconds after stop. `finalization` records timeout,
+missing listener IDs and the unresolved stage. Teardown completion is a separate event.
 
 Timing diagnostics additionally distinguish full `pipelineLatencyMs` from hardware
 `outputLatencyMs`, preserve hardware-only versus corrected timing errors, and record
@@ -187,7 +209,7 @@ Explicit stop-host/disconnect clears faults for the stopped subsystem. Reports'
 
 ### Policy and build provenance
 
-Listener and host `buildInfo` include diagnostic policy version 3, Git revision (with
+Listener and host `buildInfo` include diagnostic policy version 4, Git revision (with
 a dirty marker), and a SHA-256 fingerprint of native AudioCore source. Runner build
 phases generate `SilentDiscoAudioBuild.json` into the app bundle; source files are not
 modified. Missing bundle metadata is reported as unknown, including Swift package
@@ -195,3 +217,24 @@ tests. The opt-in `SDAudioLatencyProbe` launch setting or `SD_AUDIO_LATENCY_PROB
 environment variable reproduces the old query cadence on the isolated control queue.
 Its report flag must be false for acceptance. See AUDIO_TESTING.md for getter
 signposts, field interpretation, physical acceptance and limitations.
+
+### Timestamp and incident attribution
+
+`timestampCalls` separately aggregates `player.lastRenderTime`,
+`playerTime(forNodeTime:)`, and `output.lastRenderTime`. Slow calls retain start/end,
+site, graph/playback epochs and omission counts. One paired observation is reused
+within each scheduling pass. `SD_AUDIO_TRACE=1` or `-SDAudioTrace YES` enables detailed
+Pipeline signposts; latency getter signposts retain their existing control-queue cadence.
+The latency cadence probe remains off by default.
+
+`recoveryTimeline` records decision, fade, stop entry/return, abandoned source PCM,
+preserved encoded boundaries, restart selection/skips, source sample base, scheduled
+host start, play call and first observed player progress. Derived intervals measure
+software operations, not acoustic silence. Records are bounded to 16 plus one current
+recovery. `packetIncident` events contain frozen windows (at most 32 entries) from
+a 256-entry decision ring. Eight window summaries remain locally; eviction counters
+and retained ranges are explicit. Decisions include arrival/admission, expected
+sequence, contiguous range/headroom/deadline, PLC commitment, late-after-PLC and
+mailbox rejection. Receive arm/callback/rearm intervals and an independent coalesced
+`sessionQueueDelay` probe distinguish application queue backlog from callback gaps.
+Callback timestamps alone do not establish packet arrival at the device.
