@@ -123,6 +123,37 @@ final class AudioSchedulerTests: XCTestCase {
     XCTAssertGreaterThan(scheduled, 140)
     XCTAssertLessThan(jitter.packets.count, 100)
   }
+  func testGapsBeyondTheSharedBudgetCommitOnlySixPLCFrames() {
+    for gap in [1.250, 2.200] {
+      var jitter = AudioJitterBuffer(); jitter.begin(at: 0)
+      let renderLead = 1.250 - 0.164 - 0.0065
+      var queued = 0; var losses = 0; var arrivals = 0
+      for tick in 0..<800 {
+        let now = Double(tick) * 0.005
+        while arrivals < 100 && Double(arrivals) * 0.020 + gap <= now {
+          let n = UInt64(arrivals)
+          jitter.insert(packet(n, presentation: 1.250 - 0.0065 + Double(n) * 0.020),
+            hostNow: now, outputLead: 0.164, enforcePresentationDeadline: false)
+          arrivals += 1
+        }
+        let action = SchedulingPolicy.action(headroom: Double(queued) * 0.020 - (now - renderLead),
+          packetAvailable: jitter.nextPacket != nil, consecutiveLosses: losses, atEnd: false)
+        if action == .conceal || action == .packet {
+          if jitter.take() == nil { losses += 1; jitter.markConcealed(UInt64(queued)) }
+          queued += 1
+        }
+      }
+      XCTAssertEqual(losses, 6)
+      XCTAssertEqual(jitter.lateAfterConcealment, 6)
+      XCTAssertNil(jitter.packets[0])
+      XCTAssertEqual(SchedulingPolicy.action(headroom: -1, packetAvailable: true,
+        consecutiveLosses: losses, atEnd: false), .exhausted)
+      // A recovery can retain future arrivals but may not replace committed PLC.
+      jitter.rejoin()
+      XCTAssertNotNil(jitter.first)
+      XCTAssertGreaterThan(jitter.first!.sequence, 5)
+    }
+  }
   func testLeadCapabilityDefaultsAndLegacyCompatibility() {
     XCTAssertEqual(AudioLeadPolicy.maximum(nil), 1000)
     XCTAssertFalse(AudioLeadPolicy.supports(1.25, maximum: AudioLeadPolicy.maximum(nil)))

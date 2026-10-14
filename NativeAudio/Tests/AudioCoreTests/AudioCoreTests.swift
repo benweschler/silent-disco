@@ -155,7 +155,7 @@ final class AudioCoreTests: XCTestCase {
     XCTAssertNil(pacer.take(elapsed: .infinity))
   }
   func testListeningLifecycleKeepsExplicitStopAuthoritative() {
-    let phone = AudioSession(isHost: false)
+    let phone = AudioSession(isHost: false, startListener: { $0.start(queue: $1) }, runPeriodicTicks: false)
     func check(_ command: String, _ args: [String: Any] = [:], wants: Bool) {
       let emitted = expectation(description: command)
       phone.onSnapshot = { state in
@@ -199,14 +199,17 @@ final class AudioCoreTests: XCTestCase {
             listener.stateUpdateHandler?(.ready)
           }
         }
-      })
+      }, runPeriodicTicks: false)
+    var reported = false
     host.onSnapshot = { snapshot in
+      guard !reported else { return }
       if snapshot["status"] as? String == "hosting" {
         XCTAssertEqual(starts, 4)
         XCTAssertEqual(snapshot["hosting"] as? Bool, true)
         XCTAssertTrue(
           (snapshot["error"] as? String ?? "").contains("Bonjour discovery unavailable"))
         XCTAssertFalse((snapshot["events"] as? [[String: Any]] ?? []).isEmpty)
+        reported = true
         ready.fulfill()
       }
     }
@@ -226,13 +229,16 @@ final class AudioCoreTests: XCTestCase {
         queue.async {
           if attempt == 2 { listener.stateUpdateHandler?(.failed(.posix(.EACCES))) }
         }
-      })
+      }, runPeriodicTicks: false)
+    var reported = false
     host.onSnapshot = { snapshot in
+      guard !reported else { return }
       if snapshot["hosting"] as? Bool == false,
         (snapshot["error"] as? String ?? "").contains("TCP listener failed")
       {
         XCTAssertEqual(starts, 2)
         XCTAssertEqual(snapshot["status"] as? String, "idle")
+        reported = true
         failed.fulfill()
       }
     }
@@ -247,7 +253,10 @@ final class AudioCoreTests: XCTestCase {
   func testManualHostAfterBonjourFailureDeliversToTwoClients() throws {
     try exerciseTwoClients(forceBonjourFailure: true)
   }
-  private func exerciseTwoClients(forceBonjourFailure: Bool) throws {
+  func testCapableListenerFinalCountersAndDiagnosticDeliveryOverSockets() throws {
+    try exerciseTwoClients(forceBonjourFailure: true, incremental: true)
+  }
+  private func exerciseTwoClients(forceBonjourFailure: Bool, incremental: Bool = false) throws {
     guard ProcessInfo.processInfo.environment["SD_AUDIO_NETWORK_TEST"] == "1" else {
       throw XCTSkip("Set SD_AUDIO_NETWORK_TEST=1 for real sockets")
     }
@@ -279,7 +288,7 @@ final class AudioCoreTests: XCTestCase {
     let target = port
     lock.unlock()
     let a = TestListener(port: target)
-    let b = TestListener(port: target)
+    let b = TestListener(port: target, incremental: incremental)
     let readyA = expectation(description: "first ready")
     a.onReady = { readyA.fulfill() }
     a.start()
@@ -306,11 +315,22 @@ final class AudioCoreTests: XCTestCase {
       XCTAssertEqual(r["completeCounters"] as? Bool, false)
       XCTAssertEqual(r["acousticSynchronization"] as? String, "unverified")
       XCTAssertEqual(r["userReportedAudibleInterruptions"] as? Int, 1)
+      if incremental {
+        let rows = r["listeners"] as? [[String: Any]] ?? []
+        XCTAssertEqual(rows.count, 2) // disconnected participant stays represented
+        let final = rows.filter { $0["finalCounters"] as? Bool == true }
+        XCTAssertEqual(final.count, 1)
+        XCTAssertEqual(final.first?["diagnosticDeliveryComplete"] as? Bool, true)
+        let stats = final.first?["stats"] as? [String: Any] ?? [:]
+        XCTAssertGreaterThan(stats["received"] as? Int ?? 0, 1)
+        let evidence = stats["diagnostics"] as? [String: Any] ?? [:]
+        XCTAssertEqual((evidence["events"] as? [[String: Any]])?.first?["kind"] as? String, "testIncident")
+      }
       report.fulfill()
     }
     host.perform("markAudibleInterruption")
     host.perform("stopStream")
-    wait(for: [report, stopped], timeout: 5)
+    wait(for: [report, stopped], timeout: 8)
     a.stop()
     b.stop()
     host.perform("stopHost")
@@ -328,14 +348,18 @@ private final class TestListener {
   var onStop: ((UInt64?) -> Void)?
   var packets = 0
   var acknowledged = false
-  init(port: Int) {
+  let incremental: Bool
+  var generation = "0"
+  init(port: Int, incremental: Bool = false) {
+    self.incremental = incremental
     tcp = NWConnection(
       host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(port))!, using: .tcp)
   }
   func start() {
     tcp.stateUpdateHandler = { [weak self] state in
       if case .ready = state {
-        self?.send(["type": "hello", "version": 1, "maxLeadMs": 1250])
+        self?.send(["type": "hello", "version": 1, "maxLeadMs": 1250,
+          "diagnosticDelivery": self?.incremental == true ? 1 : 0])
         self?.read()
       }
     }
@@ -368,7 +392,15 @@ private final class TestListener {
             }
             c.start(queue: self.queue)
           }
+          if m["type"] as? String == "stream" { self.generation = m["generation"] as? String ?? "0" }
           if m["type"] as? String == "stop" {
+            if self.incremental {
+              self.send(["type": "stats", "generation": self.generation, "final": true,
+                "finalDiagnosticSequence": 1, "stats": ["received": self.packets]])
+              self.send(["type": "stats", "generation": self.generation, "stats": ["received": 1]])
+              self.send(["type": "diagnosticBatch", "generation": self.generation, "evictedThrough": 0,
+                "through": 1, "events": [["sequence": 1, "generation": self.generation, "kind": "testIncident"]]])
+            }
             self.onStop?((m["lastSequence"] as? String).flatMap(UInt64.init))
           }
           if m["type"] as? String == "heartbeat" { self.send(["type": "heartbeat"]) }

@@ -36,9 +36,9 @@ final class AudioDiagnosticsTests: XCTestCase {
     XCTAssertEqual(d.events[0]["streamSeconds"] as? Double, 1)
     d.begin(7)
     XCTAssertEqual(d.events.count, 1)
-    for i in 0..<40 { d.record("reset", at: Double(i), utc: "now", offset: 0, origin: 0) }
-    XCTAssertEqual(d.events.count, 32)
-    XCTAssertEqual(d.overflow, 9)
+    for i in 0..<300 { d.record("reset", at: Double(i), utc: "now", offset: 0, origin: 0) }
+    XCTAssertEqual(d.events.count, 256)
+    XCTAssertEqual(d.overflow, 45)
     XCTAssertEqual((d.json["events"] as? [[String: Any]])?.count, 8)
     d.begin(8)
     XCTAssertTrue(d.events.isEmpty)

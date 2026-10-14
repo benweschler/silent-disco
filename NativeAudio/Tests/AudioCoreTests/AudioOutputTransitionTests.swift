@@ -28,7 +28,7 @@ final class AudioOutputTransitionTests: XCTestCase {
         let p = OutputClockPoint(epoch: 1, captured: row.0, host: row.1,
           samples: row.2, sampleRate: 48000, playerSamples: row.3, rateScalar: nil)
         let decision = controller.observe(p, error: row.4 / 1000, latencyFresh: true, at: row.0)
-        XCTAssertNil(decision.recovery)
+        XCTAssertFalse(decision.correctionAllowed)
         XCTAssertFalse(decision.correctionAllowed)
       }
       XCTAssertEqual(controller.state, .outputTransition)
@@ -36,42 +36,35 @@ final class AudioOutputTransitionTests: XCTestCase {
       XCTAssertEqual(controller.slope, expected, accuracy: 0.005)
     }
   }
-  func testTransitionTimeoutAllowsOnlyOneRecoveryAcrossRestarts() {
+  func testTransitionBeyondThreeSecondsDegradesOnceWithoutRejoin() {
     var c = PlaybackTimingController(); c.restart(epoch: 1)
-    var recoveries = 0
-    var epoch: UInt64 = 1
+    var degraded = 0
     for i in 0...160 {
       let t = Double(i) * 0.05
-      let result = c.observe(point(t, samples: t * 1.117, epoch: epoch),
-        error: -0.070, latencyFresh: true, at: t)
-      if result.recovery != nil {
-        recoveries += 1; epoch += 1; c.restart(epoch: epoch)
-      }
+      let result = c.observe(point(t, samples: t * 1.117), error: -0.150, latencyFresh: true, at: t)
+      if result.episodeEvent == "timingDegraded" { degraded += 1 }
+      XCTAssertFalse(result.correctionAllowed)
     }
-    XCTAssertEqual(recoveries, 1)
+    XCTAssertEqual(degraded, 1)
+    XCTAssertEqual(c.state, .outputTransition)
   }
-  func testStableReacquisitionThenSustainedResidualPhaseRejoinsOnce() {
+  func testStableLargeResidualRemainsVisibleUntilHealthyForHalfSecond() {
     var c = PlaybackTimingController(); c.restart(epoch: 1)
-    for i in 0...20 {
+    for i in 0...100 {
       let t = Double(i) * 0.05
-      XCTAssertNil(c.observe(point(t, samples: t * 0.906), error: 0.070,
-        latencyFresh: true, at: t).recovery)
+      let result = c.observe(point(t), error: 0.150, latencyFresh: true, at: t)
+      XCTAssertFalse(result.correctionAllowed)
     }
-    var recoveries = 0
-    for i in 21...60 {
+    XCTAssertEqual(c.summary["phaseErrorMs"] as? Double, 150)
+    var ended = 0
+    for i in 101...120 {
       let t = Double(i) * 0.05
-      let result = c.observe(point(t, samples: 0.906 + t - 1), error: 0.070,
-        latencyFresh: true, at: t)
-      if t < 1.5 { XCTAssertFalse(result.correctionAllowed) }
-      if result.recovery != nil { recoveries += 1 }
+      let result = c.observe(point(t), error: 0.001, latencyFresh: true, at: t)
+      if t < 5.55 { XCTAssertFalse(result.correctionAllowed) }
+      if result.episodeEvent == "timingEpisodeEnded" { ended += 1 }
     }
-    XCTAssertEqual(recoveries, 1)
-    // A recovered, stable phase releases the latch for a later independent episode.
-    for i in 61...90 {
-      let t = Double(i) * 0.05
-      _ = c.observe(point(t, samples: 0.906 + t - 1), error: 0.001, latencyFresh: true, at: t)
-    }
-    XCTAssertEqual(c.summary["recoveryUsed"] as? Bool, false)
+    XCTAssertEqual(ended, 1)
+    XCTAssertTrue(c.observe(point(6.05), error: 0.001, latencyFresh: true, at: 6.05).correctionAllowed)
   }
   func testInvalidAndStaleObservationsNeverAuthorizeTimingCorrection() {
     var c = PlaybackTimingController(); c.restart(epoch: 1)
@@ -109,7 +102,7 @@ final class AudioOutputTransitionTests: XCTestCase {
       let t = Double(i) * 0.05
       let decision = c.observe(point(t), error: 0.070, latencyFresh: false, at: t)
       XCTAssertFalse(decision.correctionAllowed)
-      XCTAssertNil(decision.recovery)
+      XCTAssertFalse(decision.correctionAllowed)
     }
   }
   func testCompactTransitionSummarySurvivesObservationTrimming() throws {
@@ -131,5 +124,28 @@ final class AudioOutputTransitionTests: XCTestCase {
     XCTAssertEqual(summary["state"] as? String, "outputTransition")
     XCTAssertNotNil(summary["start"]); XCTAssertNotNil(summary["end"])
     XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: frame).count, 16384)
+  }
+  func testTransitionSummaryEndsEvenWhenLargeResidualEpisodeContinues() throws {
+    var c = PlaybackTimingController(); c.restart(epoch: 1)
+    for i in 0...20 {
+      let t = Double(i) * 0.05
+      _ = c.observe(point(t, samples: t * 1.117), error: -0.150, latencyFresh: true, at: t, clockOffset: 0.002)
+    }
+    for i in 21...60 {
+      let t = Double(i) * 0.05
+      _ = c.observe(point(t, samples: 1.117 + t - 1), error: -0.150, latencyFresh: true, at: t, clockOffset: 0.003)
+    }
+    let transition = try XCTUnwrap(c.summary["outputTransition"] as? [String: Any])
+    XCTAssertEqual(transition["completed"] as? Bool, true)
+    XCTAssertEqual(transition["playbackContinued"] as? Bool, true)
+    XCTAssertEqual(transition["maximumSlope"] as? Double ?? 0, 1.117, accuracy: 0.001)
+    XCTAssertEqual(transition["clockOffsetChangeMs"] as? Double ?? 0, 1, accuracy: 0.001)
+    XCTAssertNotNil(c.summary["episodeStarted"] as? Double)
+    XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: c.summary))
+  }
+  func testInvalidPhaseProducesSerializableEpisodeEvidence() {
+    var c = PlaybackTimingController(); c.restart(epoch: 1)
+    _ = c.observe(point(1), error: .nan, latencyFresh: true, at: 1)
+    XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: c.summary))
   }
 }

@@ -6,6 +6,70 @@ struct AudioDiagnostics {
   private(set) var events = [[String: Any]]()
   private(set) var overflow = 0
   private var next = 1
+  private var acknowledged = 0
+  private var flight: [String: Any]?
+  private var flightLast = 0
+  private var sentAt = 0.0
+  private var retries = 0
+  private var detailOmissions = 0
+  var latestSequence: Int { next - 1 }
+  var deliveryComplete: Bool { acknowledged >= latestSequence }
+  var deliverySummary: [String: Any] {
+    ["acknowledgedThrough": acknowledged, "latestSequence": latestSequence,
+      "retentionOverflow": overflow, "retries": retries, "detailOmissions": detailOmissions,
+      "evictedThrough": max(0, (events.first?["sequence"] as? Int ?? next) - 1)]
+  }
+  mutating func acknowledge(_ sequence: Int) {
+    guard sequence >= acknowledged, sequence <= flightLast else { return }
+    acknowledged = sequence
+    if sequence >= flightLast { flight = nil }
+  }
+  mutating func batch(at now: Double) -> [String: Any]? {
+    if let flight = flight {
+      guard now - sentAt >= 1 else { return nil }
+      sentAt = now; retries += 1
+      var retry = flight; retry["delivery"] = deliverySummary; return retry
+    }
+    guard !deliveryComplete else { return nil }
+    let evicted = max(0, (events.first?["sequence"] as? Int ?? next) - 1)
+    var frame: [String: Any] = ["type": "diagnosticBatch", "generation": String(generation),
+      "evictedThrough": evicted, "events": [[String: Any]]()]
+    var batch = [[String: Any]]()
+    for original in events where (original["sequence"] as? Int ?? 0) > acknowledged {
+      var event = original
+      var eventOmissions = 0
+      if var incident = event["incident"] as? [String: Any], var entries = incident["entries"] as? [[String: Any]] {
+        var removed = 0
+        while (try? JSONSerialization.data(withJSONObject: event).count) ?? 0 > 8000, !entries.isEmpty {
+          let entry = entries.removeFirst(); removed += 1
+          incident["omittedEvidenceThrough"] = entry["evidenceSequence"] ?? 0
+          incident["entries"] = entries; incident["transportEntryOmissions"] = removed
+          event["incident"] = incident
+        }
+        eventOmissions += removed
+      }
+      // Compact oversized evidence explicitly; aggregate counters and summaries survive.
+      for key in ["timingObservations", "packetIncidents", "recoveryTimeline", "passDiagnostics"] {
+        if (try? JSONSerialization.data(withJSONObject: event).count) ?? 0 <= 8000 { break }
+        if event.removeValue(forKey: key) != nil { eventOmissions += 1; event["detailOmissions"] = eventOmissions }
+      }
+      if (try? JSONSerialization.data(withJSONObject: event).count) ?? 0 > 8000 {
+        event = ["sequence": original["sequence"] ?? 0, "generation": String(generation),
+          "kind": original["kind"] ?? "unknown", "evidenceOmitted": "oversized event", "monotonicSeconds": original["monotonicSeconds"] ?? 0]
+        eventOmissions += 1
+      }
+      frame["events"] = batch + [event]
+      guard (try? JSONSerialization.data(withJSONObject: frame).count) ?? Int.max <= 16000 else { break }
+      detailOmissions += eventOmissions
+      batch.append(event)
+    }
+    frame["events"] = batch
+    flightLast = batch.last?["sequence"] as? Int ?? evicted
+    frame["through"] = flightLast
+    frame["delivery"] = deliverySummary
+    flight = frame; sentAt = now
+    return frame
+  }
   mutating func begin(_ value: UInt64) {
     guard generation != value else { return }
     self = AudioDiagnostics()
@@ -24,7 +88,7 @@ struct AudioDiagnostics {
     event["streamSeconds"] = at + offset - origin
     next += 1
     events.append(event)
-    if events.count > 32 { events.removeFirst(); overflow += 1 }
+    if events.count > 256 { events.removeFirst(); overflow += 1 }
   }
   var json: [String: Any] {
     ["events": Array(events.suffix(8)), "retentionOverflow": overflow,
@@ -36,13 +100,19 @@ struct ReceivedAudioDiagnostics {
   private(set) var events = [[String: Any]]()
   private(set) var overflow = 0
   private(set) var gaps = 0
-  private var highest = 0
-  mutating func merge(_ incoming: [[String: Any]], generation: UInt64) {
+  private(set) var highest = 0
+  private var declaredEvictions = 0
+  mutating func evict(through sequence: Int) {
+    guard sequence > highest else { return }
+    declaredEvictions += sequence - highest; highest = sequence
+  }
+  mutating func merge(_ incoming: [[String: Any]], generation: UInt64, contiguous: Bool = false) {
     for event in incoming.sorted(by: {
       ($0["sequence"] as? Int ?? 0) < ($1["sequence"] as? Int ?? 0)
     }) {
       guard event["generation"] as? String == String(generation),
         let sequence = event["sequence"] as? Int, sequence > highest else { continue }
+      if contiguous && sequence != highest + 1 { break }
       gaps += max(0, sequence - highest - 1)
       highest = sequence
       events.append(event)
@@ -54,6 +124,8 @@ struct ReceivedAudioDiagnostics {
     value["events"] = events
     value["hostRetentionOverflow"] = overflow
     value["observedSequenceGaps"] = gaps
+    value["declaredTransportEvictions"] = declaredEvictions
+    value["receivedThrough"] = highest
     return value
   }
 }
@@ -106,9 +178,18 @@ struct RenderMeasurements {
 // Trim evidence, not playback state, to satisfy the existing control-frame limit.
 enum DiagnosticControlFrame {
   static func prepare(_ object: [String: Any], omissions: inout Int) -> [String: Any] {
-    guard var stats = object["stats"] as? [String: Any],
-      var diagnostics = stats["diagnostics"] as? [String: Any] else { return object }
+    guard var stats = object["stats"] as? [String: Any] else { return object }
     var result = object
+    if var renderer = stats["rendererDiagnostics"] as? [String: Any] {
+      for key in ["packetIncidents", "recoveryTimeline"] {
+        if (try? JSONSerialization.data(withJSONObject: stats).count) ?? 0 < 10000 { break }
+        if renderer.removeValue(forKey: key) != nil {
+          renderer["transportDetailOmissions"] = (renderer["transportDetailOmissions"] as? Int ?? 0) + 1
+          stats["rendererDiagnostics"] = renderer
+        }
+      }
+    }
+    var diagnostics = stats["diagnostics"] as? [String: Any] ?? [:]
     var events = diagnostics["events"] as? [[String: Any]] ?? []
     var observationOmissions = diagnostics["observationOmissions"] as? Int ?? 0
     while true {
@@ -128,7 +209,14 @@ enum DiagnosticControlFrame {
         observationOmissions += 1
         continue
       }
-      guard !events.isEmpty else { return result }
+      if events.isEmpty {
+        // Detailed evidence must never prevent independent final counter delivery.
+        if stats.removeValue(forKey: "rendererDiagnostics") != nil {
+          stats["rendererDetailsOmitted"] = true; omissions += 1; continue
+        }
+        if stats.removeValue(forKey: "events") != nil { omissions += 1; continue }
+        return result
+      }
       events.removeFirst()
       omissions += 1
     }

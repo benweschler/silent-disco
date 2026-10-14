@@ -20,9 +20,16 @@ private final class AudioPeer {
   var submitted = 0
   var sendErrors = 0
   var dropped = 0
-  var stats = [String: Any]()
-  var final = false
+  var snapshot = FinalListenerSnapshot()
+  var stats: [String: Any] {
+    get { snapshot.stats }
+    set { snapshot.accept(newValue, final: false, sequence: 0) }
+  }
+  var final: Bool { snapshot.final }
+  var incrementalDiagnostics = false
+  var finalDiagnosticSequence: Int { snapshot.diagnosticSequence }
   var diagnosticHistory = ReceivedAudioDiagnostics()
+  var detailedEvidence = [String: Any]()
   init(_ tcp: NWConnection, now: Double = AudioWire.now()) {
     self.tcp = tcp
     self.lastHeard = now
@@ -31,11 +38,15 @@ private final class AudioPeer {
     token = withUnsafeBytes(of: &uuid) { Data($0) }
   }
   var row: [String: Any] {
-    [
+    var reportedStats = stats
+    if !detailedEvidence.isEmpty { reportedStats["diagnostics"] = detailedEvidence }
+    return [
       "id": id, "name": name, "ready": ready, "listening": wants, "submitted": submitted,
-      "sendErrors": sendErrors, "queueDrops": dropped, "stats": stats, "finalCounters": final,
+      "sendErrors": sendErrors, "queueDrops": dropped, "stats": reportedStats, "finalCounters": final,
       "maxLeadMs": maxLeadMs, "compatibilityError": compatibilityError,
       "excluded": !compatibilityError.isEmpty,
+      "diagnosticDeliveryComplete": !incrementalDiagnostics || (final && diagnosticHistory.highest >= finalDiagnosticSequence),
+      "finalDiagnosticSequence": finalDiagnosticSequence,
       "networkMissing": final
         ? max(0, submitted - (stats["received"] as? Int ?? 0)) as Any : NSNull(),
     ]
@@ -153,6 +164,13 @@ public final class AudioSession {
   private var retryIndex = 0
   private var active = false
   private var draining = false
+  private var finishReason = ""
+  private var participantIDs = Set<String>()
+  private var finalizationTimedOut = false
+  private var listenerFinalStats: [String: Any]?
+  private let sessionQueueProbe = SessionQueueProbe()
+  private var receiveWork = SenderDiagnostics()
+  private var lastReceive: [String: Any] = [:]
   private var wants = false
   private var stream: UInt64 = 0
   private var anchor = 0.0
@@ -188,7 +206,8 @@ public final class AudioSession {
       "appBuild": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
       "os": ProcessInfo.processInfo.operatingSystemVersionString,
       "buildRevision": AudioBuildInfo.revision, "sourceFingerprint": AudioBuildInfo.fingerprint,
-      "diagnosticPolicyVersion": AudioBuildInfo.policyVersion]
+      "diagnosticPolicyVersion": AudioBuildInfo.policyVersion,
+      "timingRecoveryPolicy": "observeWithoutRejoin", "traceEnabled": AudioTrace.enabled]
   }()
   private var senderWork = [String: Any]()
   private var senderDelivery = SenderDiagnostics()
@@ -237,7 +256,7 @@ public final class AudioSession {
     renderer.onStats = { [weak self] stats in
       self?.queue.async { [weak self] in
         guard let self = self, stats["generation"] as? String == String(self.stream) else { return }
-        self.lastStats = stats
+        if self.listenerFinalStats == nil { self.lastStats = stats }
         self.errors.rendererStats(state: stats["state"] as? String,
           listening: self.wants, running: self.rendererRunning)
       }
@@ -253,6 +272,9 @@ public final class AudioSession {
         let kind = fields["diagnosticKind"] as? String
           ?? (fields["reason"] as? String == "Renderer stopped or restarted"
             ? "rendererStopped" : "playbackReset")
+        if kind == "graphTeardownCompleted", !self.active, !self.rendererRunning {
+          self.onListening?(false)
+        }
         self.diagnostics.record(kind, at: at, utc: utc, offset: offset,
           origin: self.anchor, fields: fields)
       }
@@ -602,7 +624,7 @@ public final class AudioSession {
         if !self.isHost {
           self.send(
             ["type": "hello", "version": 1, "name": ProcessInfo.processInfo.hostName,
-             "maxLeadMs": AudioLeadPolicy.defaultMs], to: p)
+             "maxLeadMs": AudioLeadPolicy.defaultMs, "diagnosticDelivery": 1], to: p)
         }
         self.receiveTCP(p)
       case .failed(let e): self.drop(p, "Connection failed: \(e)")
@@ -672,13 +694,14 @@ public final class AudioSession {
         throw AudioFailure("Unsupported audio protocol")
       }
       p.hello = true
+      p.incrementalDiagnostics = m["diagnosticDelivery"] as? Int == 1
       p.maxLeadMs = AudioLeadPolicy.maximum(m["maxLeadMs"] as? Int)
       updateCompatibility(p)
       p.name = String((m["name"] as? String ?? "Listener").prefix(80))
       send(
         [
           "type": "welcome", "version": 1, "token": p.token.base64EncodedString(),
-          "udpPort": Int(port.rawValue),
+          "udpPort": Int(port.rawValue), "diagnosticDelivery": 1,
         ], to: p)
     case "welcome" where !isHost:
       guard !p.hello, m["version"] as? Int == 1, let raw = m["token"] as? String,
@@ -688,6 +711,7 @@ public final class AudioSession {
       else { throw AudioFailure("Invalid audio handshake") }
       p.hello = true
       p.token = token
+      p.incrementalDiagnostics = m["diagnosticDelivery"] as? Int == 1
       clock = ClockEstimate()
       pendingClocks.removeAll()
       lastClock = 0
@@ -741,6 +765,8 @@ public final class AudioSession {
         duplicates = 0
         gaps = GapStats()
         lastStats = [:]
+        listenerFinalStats = nil
+        receiveWork = SenderDiagnostics(); lastReceive = [:]
         diagnostics.begin(generation)
         transportOmissions = 0
         transportTimer = TransportTimerDiagnostics()
@@ -759,6 +785,7 @@ public final class AudioSession {
       maybeRender()
     case "stop" where !isHost:
       guard m["generation"] as? String == String(stream) else { return }
+      guard clientStop == nil, listenerFinalStats == nil else { return }
       let old = stream
       let finalSequence = (m["lastSequence"] as? String).flatMap(UInt64.init)
       guard finalSequence == nil || finalSequence! < 30000 else {
@@ -772,15 +799,14 @@ public final class AudioSession {
         #if os(iOS)
           self.renderAllowed = false
         #endif
-        self.renderer.stop { [weak self, weak p] in
+        self.renderer.finalSnapshot { [weak self, weak p] snapshot in
           self?.queue.async { [weak self, weak p] in
             guard let self = self, let p = p, self.stream == old else { return }
-            self.onListening?(false)
-            self.send(
-              [
-                "type": "stats", "generation": String(old), "stats": self.clientStats(),
-                "final": true,
-              ], to: p)
+            self.lastStats = snapshot
+            self.listenerFinalStats = self.clientStats()
+            self.send(["type": "stats", "generation": String(old),
+              "stats": self.listenerFinalStats!, "final": true,
+              "finalDiagnosticSequence": self.diagnostics.latestSequence], to: p)
             self.publish()
           }
         }
@@ -795,12 +821,27 @@ public final class AudioSession {
     case "stats" where isHost:
       guard m["generation"] as? String == String(stream), var stats = m["stats"] as? [String: Any]
       else { return }
-      if let evidence = stats["diagnostics"] as? [String: Any] {
+      if !p.final, let evidence = stats["diagnostics"] as? [String: Any] {
         p.diagnosticHistory.merge(evidence["events"] as? [[String: Any]] ?? [], generation: stream)
         stats["diagnostics"] = p.diagnosticHistory.json(evidence)
+        p.detailedEvidence = stats["diagnostics"] as? [String: Any] ?? [:]
       }
-      p.stats = stats
-      p.final = m["final"] as? Bool ?? false
+      let isFinal = m["final"] as? Bool == true
+      p.snapshot.accept(stats, final: isFinal, sequence: m["finalDiagnosticSequence"] as? Int ?? 0)
+      maybeFinalize()
+    case "diagnosticBatch" where isHost:
+      guard m["generation"] as? String == String(stream), p.incrementalDiagnostics else { return }
+      p.diagnosticHistory.evict(through: m["evictedThrough"] as? Int ?? 0)
+      p.diagnosticHistory.merge(m["events"] as? [[String: Any]] ?? [], generation: stream, contiguous: true)
+      var evidence = p.stats["diagnostics"] as? [String: Any] ?? [:]
+      evidence["delivery"] = m["delivery"] ?? [:]
+      p.detailedEvidence = p.diagnosticHistory.json(evidence)
+      send(["type": "diagnosticAck", "generation": String(stream),
+        "through": p.diagnosticHistory.highest], to: p)
+      maybeFinalize()
+    case "diagnosticAck" where !isHost:
+      guard m["generation"] as? String == String(stream), p.incrementalDiagnostics else { return }
+      diagnostics.acknowledge(m["through"] as? Int ?? 0)
     case "heartbeat": break
     default: break
     }
@@ -815,6 +856,7 @@ public final class AudioSession {
   private func sendConfiguration(to p: AudioPeer) {
     updateCompatibility(p)
     guard supportsLead(p) else { publish(); return }
+    if p.wants && active { participantIDs.insert(p.id) }
     send(configuration(), to: p)
   }
   private func configuration() -> [String: Any] {
@@ -841,6 +883,7 @@ public final class AudioSession {
     receiveUDP(c, peer: nil)
   }
   private func receiveUDP(_ c: NWConnection, peer: AudioPeer?) {
+    let armedAt = AudioWire.now()
     c.receiveMessage { [weak self, weak c, weak peer] data, _, _, error in
       let callbackAt = AudioWire.now()
       guard let self = self, let c = c else { return }
@@ -850,6 +893,10 @@ public final class AudioSession {
             || self.peers.values.contains(where: { $0.udp === c })
           : peer != nil && self.client === peer && peer?.udp === c
       else { return }
+      self.lastReceive = ["receiveArmedAt": armedAt, "callbackAt": callbackAt,
+        "callbackToProcessingMs": (AudioWire.now() - callbackAt) * 1000]
+      self.receiveWork.record("receiveArmToCallback", seconds: callbackAt - armedAt)
+      self.receiveWork.record("callbackToProcessing", seconds: AudioWire.now() - callbackAt)
       if error != nil {
         if let peer = peer {
           self.drop(peer, "UDP receive failed")
@@ -901,6 +948,9 @@ public final class AudioSession {
           }
         }
       }
+      let rearmedAt = AudioWire.now()
+      self.receiveWork.record("callbackToRearm", seconds: rearmedAt - callbackAt)
+      self.lastReceive["rearmedAt"] = rearmedAt
       self.receiveUDP(c, peer: peer)
     }
   }
@@ -921,14 +971,16 @@ public final class AudioSession {
     testMarkerOverflow = 0
     lastSequence = nil
     endedPeers = []
+    participantIDs = []; finalizationTimedOut = false
+    receiveWork = SenderDiagnostics(); lastReceive = [:]
     events = []
     for p in peers.values {
       p.submitted = 0
       p.dropped = 0
       p.sendErrors = 0
-      p.stats = [:]
+      p.snapshot = FinalListenerSnapshot()
+      p.detailedEvidence = [:]
       p.diagnosticHistory = ReceivedAudioDiagnostics()
-      p.final = false
     }
     let generation = stream
     let tx = AudioTransmitter()
@@ -995,6 +1047,7 @@ public final class AudioSession {
     active = false
     draining = true
     endedAt = AudioWire.now()
+    finishReason = reason
     transmitter?.stop()
     transmitter = nil
     let generation = stream
@@ -1005,16 +1058,31 @@ public final class AudioSession {
           "lastSequence": lastSequence.map(String.init) ?? "",
         ], to: p)
     }
-    queue.asyncAfter(deadline: .now() + lead + 1.0) { [weak self] in
+    queue.asyncAfter(deadline: .now() + lead + 5.0) { [weak self] in
       guard let self = self, self.stream == generation, self.draining else { return }
-      self.makeReport(reason)
-      self.draining = false
-      self.onActivity?(false)
-      self.publish()
+      self.finalizationTimedOut = true
+      self.completeReport()
     }
+    maybeFinalize()
   }
+  private var participantRows: [[String: Any]] {
+    (endedPeers + peers.values.map(\.row)).filter { participantIDs.contains($0["id"] as? String ?? "") }
+  }
+  private func maybeFinalize() {
+    guard draining, AudioReportReadiness.evaluate(ids: participantIDs, rows: participantRows)["ready"] as? Bool == true else { return }
+    completeReport()
+  }
+  private func completeReport() {
+    guard draining else { return }
+    makeReport(finishReason); draining = false
+    onActivity?(false); publish()
+  }
+
   private func makeReport(_ reason: String) {
-    let rows = endedPeers + peers.values.map(\.row)
+    let rows = participantRows
+    var finalization = AudioReportReadiness.evaluate(ids: participantIDs, rows: rows)
+    finalization["timedOut"] = finalizationTimedOut
+    finalization["deadlineSecondsAfterStop"] = lead + 5
     let completed = reason == "completed" || reason == "stopped by user"
     let participating = rows.filter { $0["excluded"] as? Bool != true }
     let allFinal = !participating.isEmpty && participating.allSatisfy { $0["finalCounters"] as? Bool == true }
@@ -1044,8 +1112,10 @@ public final class AudioSession {
       "lookaheadSamples": lookahead, "skippedSendSlots": skipped,
       "senderDiagnostics": ["work": senderWork, "delivery": senderDelivery.json],
       "transportTimerDiagnostics": transportTimer.json,
+      "sessionQueueDiagnostics": receiveWork.json,
       "userReportedAudibleInterruptions": audibleReports, "listeners": rows,
       "completeCounters": allFinal,
+      "finalization": finalization,
       "notes": notes, "offlineSetupUserConfirmed": offline, "events": events,
       "testMarkers": testMarkers, "testMarkerRetentionOverflow": testMarkerOverflow,
       "os": ProcessInfo.processInfo.operatingSystemVersionString, "buildInfo": buildInfo,
@@ -1135,7 +1205,9 @@ public final class AudioSession {
   }
   private func clientStats() -> [String: Any] {
     var s = lastStats
-    s["diagnostics"] = diagnostics.json
+    s["diagnostics"] = client?.incrementalDiagnostics == true
+      ? diagnostics.deliverySummary.merging(["events": [[String: Any]]()]) { _, new in new } : diagnostics.json
+    s["receiveDiagnostics"] = ["aggregate": receiveWork.json, "lastReceive": lastReceive]
     s["transportTimerDiagnostics"] = transportTimer.json
     s["buildInfo"] = buildInfo
     s["received"] = received
@@ -1152,6 +1224,10 @@ public final class AudioSession {
   }
   private func ensureTicker() {
     guard runPeriodicTicks, ticker == nil else { return }
+    sessionQueueProbe.start(target: queue) { [weak self] delay in
+      guard let self = self, self.active || self.draining else { return }
+      self.receiveWork.record("sessionQueueDelay", seconds: delay)
+    }
     let t = DispatchSource.makeTimerSource(queue: queue)
     t.schedule(deadline: .now(), repeating: .milliseconds(100), leeway: .milliseconds(10))
     t.setEventHandler { [weak self] in self?.tick() }
@@ -1184,11 +1260,14 @@ public final class AudioSession {
       send(["type": "heartbeat"], to: p)
       if !isHost {
         if p.hello && !p.ready && now - lastRegister >= 1 { register(p) }
-        if active {
+        if active && listenerFinalStats == nil {
           send(["type": "stats", "generation": String(stream), "stats": clientStats()], to: p)
         }
       }
     }
+    // Control traffic above is queued first. Detailed delivery uses at most one slot.
+    if !isHost, let p = client, p.incrementalDiagnostics, p.pendingTCP < 2,
+      let batch = diagnostics.batch(at: now) { send(batch, to: p) }
     for (key, (c, created)) in candidates where now - created > 10 {
       c.cancel()
       candidates.removeValue(forKey: key)

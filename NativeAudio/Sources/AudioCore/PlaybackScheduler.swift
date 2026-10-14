@@ -21,18 +21,32 @@ final class AudioPacketMailbox {
   private var stored = 0
   private var overflow = 0
   private var duplicates = 0
+  private var rejections = [[String: Any]]()
+  private var rejectionEvictions = 0
   func begin(_ generation: UInt64, stored: Int = 0, resetCounters: Bool = true) {
     lock.lock(); defer { lock.unlock() }
     self.generation = generation; entries.removeAll(keepingCapacity: true); self.stored = stored
-    if resetCounters { overflow = 0; duplicates = 0 }
+    if resetCounters { overflow = 0; duplicates = 0; rejections = []; rejectionEvictions = 0 }
   }
   @discardableResult func offer(_ packet: AudioPacket, at now: Double) -> Bool {
     lock.lock(); defer { lock.unlock() }
     guard packet.generation == generation, generation != 0 else { return false }
-    guard entries[packet.sequence] == nil else { duplicates += 1; return false }
-    guard stored + entries.count < 100 else { overflow += 1; return false }
+    guard entries[packet.sequence] == nil else {
+      duplicates += 1; reject(packet, at: now, reason: "mailboxDuplicate"); return false
+    }
+    guard stored + entries.count < 100 else {
+      overflow += 1; reject(packet, at: now, reason: "mailboxOverflow"); return false
+    }
     entries[packet.sequence] = Entry(packet: packet, callbackAt: now)
     return true
+  }
+  private func reject(_ packet: AudioPacket, at: Double, reason: String) {
+    rejections.append(["sequence": String(packet.sequence), "callbackAt": at, "decision": reason])
+    if rejections.count > 32 { rejections.removeFirst(); rejectionEvictions += 1 }
+  }
+  func drainRejections() -> [[String: Any]] {
+    lock.lock(); defer { lock.unlock() }
+    let result = rejections; rejections = []; return result
   }
   func drain() -> [Entry] {
     lock.lock(); defer { lock.unlock() }
@@ -57,7 +71,7 @@ final class AudioPacketMailbox {
   }
   var json: [String: Any] {
     lock.lock(); defer { lock.unlock() }
-    return ["pendingPackets": entries.count, "overflow": overflow, "duplicates": duplicates]
+    return ["pendingPackets": entries.count, "overflow": overflow, "duplicates": duplicates, "rejectionEvidenceEvictions": rejectionEvictions]
   }
 }
 
@@ -112,11 +126,10 @@ struct OutputClockPoint {
   }
 }
 
-/// Classifies an output clock separately from source phase. A restart cannot release
-/// the recovery latch; only stable observations with recovered phase can do that.
+/// Timing confidence controls correction only. It has no authority to stop playback.
 struct PlaybackTimingController {
-  enum State: String { case starting, stable, outputTransition, timingUnavailable, recovering }
-  struct Decision { let recovery: String?; let stateChanged: Bool; let correctionAllowed: Bool }
+  enum State: String { case starting, stable, outputTransition, timingUnavailable }
+  struct Decision { let stateChanged: Bool; let correctionAllowed: Bool; let episodeEvent: String? }
   private(set) var state: State = .starting
   private(set) var slope: Double = 1
   private var epoch: UInt64 = 0
@@ -124,21 +137,34 @@ struct PlaybackTimingController {
   private var previous: OutputClockPoint?
   private var stableSince: Double?
   private var episodeSince: Double?
-  private var recoveryUsed = false
+  private var degraded = false
+  private var episode = [String: Any]()
+  private var completedEpisode = [String: Any]()
+  private var minimumSlope = Double.infinity
+  private var maximumSlope = -Double.infinity
+  private var minimumPhase = Double.infinity
+  private var maximumPhase = -Double.infinity
+  private var transitionSince: Double?
+  private var transition = [String: Any]()
+  private var transitionMinSlope = Double.infinity
+  private var transitionMaxSlope = -Double.infinity
+  private var transitionMinPhase = Double.infinity
+  private var transitionMaxPhase = -Double.infinity
   private var goodPhaseSince: Double?
-  private var phase = SustainedTimingError()
   private(set) var summary = [String: Any]()
 
   mutating func restart(epoch: UInt64) {
     self.epoch = epoch
+    if episodeSince != nil { episode["playbackContinued"] = false }
+    if transitionSince != nil { transition["playbackContinued"] = false }
     window = nil; previous = nil; stableSince = nil; goodPhaseSince = nil
-    phase.clear(); slope = 1
-    state = recoveryUsed ? .recovering : .starting
+    slope = 1
+    state = .starting
   }
   mutating func observe(_ point: OutputClockPoint?, error: Double?, latencyFresh: Bool,
-    at now: Double, timingActive: Bool = true) -> Decision {
+    at now: Double, timingActive: Bool = true, clockOffset: Double = 0) -> Decision {
     let old = state
-    var recovery: String?
+    var episodeEvent: String?
     var valid = false
     if let p = point, p.valid, p.epoch == epoch {
       valid = true
@@ -154,7 +180,7 @@ struct PlaybackTimingController {
           "start": previous?.json ?? [:]]
         window = p
       } else if gap {
-        state = .timingUnavailable; stableSince = nil; phase.clear(); window = p
+        state = .timingUnavailable; stableSince = nil; window = p
       } else if let first = window, p.host - first.host >= 0.200 - 0.000001 {
         let measured = (Double(p.samples) - Double(first.samples)) / first.sampleRate / (p.host - first.host)
         if measured.isFinite && measured > 0 {
@@ -171,46 +197,86 @@ struct PlaybackTimingController {
       if window == nil { window = p }
       previous = p
     } else {
-      state = .timingUnavailable; stableSince = nil; phase.clear()
+      state = .timingUnavailable; stableSince = nil
       window = nil; previous = nil
     }
     if !latencyFresh || error == nil || error?.isFinite != true {
       if state != .outputTransition { state = .timingUnavailable }
-      phase.clear(); goodPhaseSince = nil
+      goodPhaseSince = nil
     }
     if timingActive && latencyFresh && (!valid || error?.isFinite != true), episodeSince == nil {
       episodeSince = now
     }
-    let canCorrect = valid && latencyFresh && state == .stable && error?.isFinite == true
-    if canCorrect {
-      let decision = phase.observe(error: error, at: now)
-      if decision.reset && !recoveryUsed {
-        recovery = "Stable source phase exceeded 50 ms for 200 ms"
+    let phaseHealthy = error.map { $0.isFinite && abs($0) <= 0.050 } == true
+    let healthy = valid && latencyFresh && state == .stable && phaseHealthy
+    if timingActive && !healthy && episode.isEmpty {
+      if episodeSince == nil { episodeSince = now }
+      episode = ["entry": point?.json ?? [:], "entryClockOffsetMs": clockOffset * 1000, "playbackContinued": true, "entryPhaseErrorMs": error.flatMap { $0.isFinite ? $0 * 1000 : nil } as Any? ?? NSNull()]
+      minimumSlope = .infinity; maximumSlope = -.infinity
+      minimumPhase = .infinity; maximumPhase = -.infinity
+    }
+    if episodeSince != nil {
+      if valid { minimumSlope = min(minimumSlope, slope); maximumSlope = max(maximumSlope, slope) }
+      if let error = error, error.isFinite {
+        minimumPhase = min(minimumPhase, error * 1000); maximumPhase = max(maximumPhase, error * 1000)
       }
-      if abs(error!) <= 0.050 {
-        if goodPhaseSince == nil { goodPhaseSince = now }
-        if now - goodPhaseSince! >= 0.500 {
-          recoveryUsed = false; episodeSince = nil
-        }
-      } else { goodPhaseSince = nil }
-    } else { phase.clear(); goodPhaseSince = nil }
-    if let since = episodeSince, now - since >= 3, state != .stable, !recoveryUsed, latencyFresh {
-      recovery = state == .timingUnavailable
-        ? "Timing observations unavailable for three seconds"
-        : "Output transition unresolved for three seconds"
+      episode["exit"] = point?.json ?? [:]
+      episode["timestampValid"] = valid
+      episode["minimumSlope"] = minimumSlope.isFinite ? minimumSlope as Any : NSNull()
+      episode["maximumSlope"] = maximumSlope.isFinite ? maximumSlope as Any : NSNull()
+      episode["minimumPhaseMs"] = minimumPhase.isFinite ? minimumPhase as Any : NSNull()
+      episode["maximumPhaseMs"] = maximumPhase.isFinite ? maximumPhase as Any : NSNull()
+      episode["clockOffsetChangeMs"] = clockOffset * 1000 - (episode["entryClockOffsetMs"] as? Double ?? 0)
     }
-    if recovery != nil {
-      recoveryUsed = true; state = .recovering; phase.clear()
+    if healthy {
+      if goodPhaseSince == nil { goodPhaseSince = now }
+      if now - goodPhaseSince! >= 0.500, let since = episodeSince {
+        episode["durationSeconds"] = now - since
+        episodeEvent = "timingEpisodeEnded"
+        completedEpisode = episode; episode = [:]
+        episodeSince = nil; degraded = false
+      }
+    } else { goodPhaseSince = nil }
+    if let since = episodeSince, now - since >= 3, !degraded {
+      degraded = true; episodeEvent = "timingDegraded"
     }
+    if let since = transitionSince {
+      if transition["entryClockOffsetMs"] == nil { transition["entryClockOffsetMs"] = clockOffset * 1000 }
+      if valid { transitionMinSlope = min(transitionMinSlope, slope); transitionMaxSlope = max(transitionMaxSlope, slope) }
+      if let error = error, error.isFinite {
+        transitionMinPhase = min(transitionMinPhase, error * 1000)
+        transitionMaxPhase = max(transitionMaxPhase, error * 1000)
+      }
+      transition["exit"] = point?.json ?? [:]
+      transition["durationSeconds"] = now - since
+      transition["minimumSlope"] = transitionMinSlope.isFinite ? transitionMinSlope as Any : NSNull()
+      transition["maximumSlope"] = transitionMaxSlope.isFinite ? transitionMaxSlope as Any : NSNull()
+      transition["minimumPhaseMs"] = transitionMinPhase.isFinite ? transitionMinPhase as Any : NSNull()
+      transition["maximumPhaseMs"] = transitionMaxPhase.isFinite ? transitionMaxPhase as Any : NSNull()
+      transition["clockOffsetChangeMs"] = clockOffset * 1000 - (transition["entryClockOffsetMs"] as? Double ?? 0)
+      transition["timestampValid"] = valid
+      if state == .stable { transitionSince = nil; transition["completed"] = true }
+    }
+    summary["outputTransition"] = transition
     summary["state"] = state.rawValue
-    summary["recoveryUsed"] = recoveryUsed
+    summary["timingRecoveryPolicy"] = "observeWithoutRejoin"
+    summary["degraded"] = degraded
     summary["episodeStarted"] = episodeSince as Any? ?? NSNull()
+    summary["episode"] = episode.isEmpty ? completedEpisode : episode
     summary["phaseErrorMs"] = error.flatMap { $0.isFinite ? $0 * 1000 : nil } as Any? ?? NSNull()
-    return Decision(recovery: recovery, stateChanged: old != state,
-      correctionAllowed: canCorrect && recovery == nil)
+    return Decision(stateChanged: old != state,
+      correctionAllowed: healthy && goodPhaseSince.map { now - $0 >= 0.500 } == true,
+      episodeEvent: episodeEvent)
   }
+
   private mutating func enterTransition(at now: Double) {
+    if transitionSince == nil {
+      transitionSince = now
+      transition = ["entry": window?.json ?? previous?.json ?? [:], "playbackContinued": true, "completed": false]
+      transitionMinSlope = .infinity; transitionMaxSlope = -.infinity
+      transitionMinPhase = .infinity; transitionMaxPhase = -.infinity
+    }
     if episodeSince == nil { episodeSince = now }
-    state = .outputTransition; stableSince = nil; goodPhaseSince = nil; phase.clear()
+    state = .outputTransition; stableSince = nil; goodPhaseSince = nil
   }
 }
