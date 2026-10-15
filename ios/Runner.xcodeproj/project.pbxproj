@@ -3,16 +3,10 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 54;
+	objectVersion = 60;
 	objects = {
 
 /* Begin PBXBuildFile section */
-        A0D100000000000000000011 /* AudioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D100000000000000000001; };
-        A0D100000000000000000012 /* AudioCore in Frameworks */ = {isa = PBXBuildFile; productRef = A0D100000000000000000003; };
-        A0D100000000000000000013 /* OPUS-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = A0D100000000000000000004; };
-		D15C00000000000000000012 /* DiagnosticBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15C00000000000000000002 /* DiagnosticBridge.swift */; };
-		D15C00000000000000000011 /* DiagnosticEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15C00000000000000000001 /* DiagnosticEngine.swift */; };
-		D15C00000000000000000010 /* DiagnosticProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15C00000000000000000000 /* DiagnosticProtocol.swift */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
 		331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C807B294A618700263BE5 /* RunnerTests.swift */; };
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
@@ -22,6 +16,12 @@
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
+		A0D100000000000000000011 /* Audio/AudioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D100000000000000000001 /* Audio/AudioBridge.swift */; };
+		A0D100000000000000000012 /* AudioCore in Frameworks */ = {isa = PBXBuildFile; productRef = A0D100000000000000000003 /* AudioCore */; };
+		A0D100000000000000000013 /* OPUS-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = A0D100000000000000000004 /* OPUS-LICENSE.txt */; };
+		D15C00000000000000000010 /* Diagnostics/DiagnosticProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15C00000000000000000000 /* Diagnostics/DiagnosticProtocol.swift */; };
+		D15C00000000000000000011 /* Diagnostics/DiagnosticEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15C00000000000000000001 /* Diagnostics/DiagnosticEngine.swift */; };
+		D15C00000000000000000012 /* Diagnostics/DiagnosticBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = D15C00000000000000000002 /* Diagnostics/DiagnosticBridge.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -48,11 +48,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-        A0D100000000000000000001 /* AudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Audio/AudioBridge.swift; sourceTree = "<group>"; };
-        A0D100000000000000000004 /* OPUS-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = OPUS-LICENSE.txt; sourceTree = "<group>"; };
-		D15C00000000000000000002 /* DiagnosticBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagnosticBridge.swift; sourceTree = "<group>"; };
-		D15C00000000000000000001 /* DiagnosticEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagnosticEngine.swift; sourceTree = "<group>"; };
-		D15C00000000000000000000 /* DiagnosticProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagnosticProtocol.swift; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
 		331C807B294A618700263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
@@ -70,6 +65,11 @@
 		97C146FD1CF9000F007C117D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A0D100000000000000000001 /* Audio/AudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Audio/AudioBridge.swift; sourceTree = "<group>"; };
+		A0D100000000000000000004 /* OPUS-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OPUS-LICENSE.txt"; sourceTree = "<group>"; };
+		D15C00000000000000000000 /* Diagnostics/DiagnosticProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagnosticProtocol.swift; sourceTree = "<group>"; };
+		D15C00000000000000000001 /* Diagnostics/DiagnosticEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagnosticEngine.swift; sourceTree = "<group>"; };
+		D15C00000000000000000002 /* Diagnostics/DiagnosticBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagnosticBridge.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -78,7 +78,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */,
-                A0D100000000000000000012 /* AudioCore in Frameworks */,
+				A0D100000000000000000012 /* AudioCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -133,11 +133,11 @@
 				97C147021CF9000F007C117D /* Info.plist */,
 				1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */,
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
-				D15C00000000000000000000 /* DiagnosticProtocol.swift */,
-				D15C00000000000000000001 /* DiagnosticEngine.swift */,
-				D15C00000000000000000002 /* DiagnosticBridge.swift */,
-                A0D100000000000000000001 /* AudioBridge.swift */,
-                A0D100000000000000000004 /* OPUS-LICENSE.txt */,
+				D15C00000000000000000000 /* Diagnostics/DiagnosticProtocol.swift */,
+				D15C00000000000000000001 /* Diagnostics/DiagnosticEngine.swift */,
+				D15C00000000000000000002 /* Diagnostics/DiagnosticBridge.swift */,
+				A0D100000000000000000001 /* Audio/AudioBridge.swift */,
+				A0D100000000000000000004 /* OPUS-LICENSE.txt */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
@@ -183,7 +183,7 @@
 			);
 			name = Runner;
 			packageProductDependencies = (
-                A0D100000000000000000003 /* AudioCore */,
+				A0D100000000000000000003 /* AudioCore */,
 				78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */,
 			);
 			productName = Runner;
@@ -220,7 +220,7 @@
 			);
 			mainGroup = 97C146E51CF9000F007C117D;
 			packageReferences = (
-                A0D100000000000000000002 /* NativeAudio */,
+				A0D100000000000000000002 /* XCLocalSwiftPackageReference "../NativeAudio" */,
 				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */,
 			);
 			productRefGroup = 97C146EF1CF9000F007C117D /* Products */;
@@ -248,7 +248,7 @@
 				97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */,
 				3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */,
 				97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */,
-                A0D100000000000000000013 /* OPUS-LICENSE.txt in Resources */,
+				A0D100000000000000000013 /* OPUS-LICENSE.txt in Resources */,
 				97C146FC1CF9000F007C117D /* Main.storyboard in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -291,10 +291,17 @@
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
-			files = ();
-			inputPaths = ("$(SRCROOT)/../scripts/audio_build_info.sh", "$(SRCROOT)/../NativeAudio/Sources/AudioCore", "$(SRCROOT)/../.git");
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../scripts/audio_build_info.sh",
+				"$(SRCROOT)/../NativeAudio/Sources/AudioCore",
+				"$(SRCROOT)/../.git",
+			);
 			name = "Audio Build Provenance";
-			outputPaths = ("$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/SilentDiscoAudioBuild.json");
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/SilentDiscoAudioBuild.json",
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "/bin/sh \"$SRCROOT/../scripts/audio_build_info.sh\"\n";
@@ -314,10 +321,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				D15C00000000000000000010 /* DiagnosticProtocol.swift in Sources */,
-				D15C00000000000000000011 /* DiagnosticEngine.swift in Sources */,
-				D15C00000000000000000012 /* DiagnosticBridge.swift in Sources */,
-                A0D100000000000000000011 /* AudioBridge.swift in Sources */,
+				D15C00000000000000000010 /* Diagnostics/DiagnosticProtocol.swift in Sources */,
+				D15C00000000000000000011 /* Diagnostics/DiagnosticEngine.swift in Sources */,
+				D15C00000000000000000012 /* Diagnostics/DiagnosticBridge.swift in Sources */,
+				A0D100000000000000000011 /* Audio/AudioBridge.swift in Sources */,
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
@@ -667,18 +674,25 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-        A0D100000000000000000002 /* NativeAudio */ = {isa = XCLocalSwiftPackageReference; relativePath = ../NativeAudio; };
 		781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage;
 		};
+		A0D100000000000000000002 /* XCLocalSwiftPackageReference "../NativeAudio" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../NativeAudio;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-        A0D100000000000000000003 /* AudioCore */ = {isa = XCSwiftPackageProductDependency; package = A0D100000000000000000002; productName = AudioCore; };
 		78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = FlutterGeneratedPluginSwiftPackage;
+		};
+		A0D100000000000000000003 /* AudioCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A0D100000000000000000002 /* XCLocalSwiftPackageReference "../NativeAudio" */;
+			productName = AudioCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
