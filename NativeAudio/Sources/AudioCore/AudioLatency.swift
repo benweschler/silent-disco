@@ -60,20 +60,23 @@ final class AudioControlQueue {
 /// The control queue creates/stops graphs only after the scheduler relinquishes its lease.
 final class PlaybackGraph {
   let epoch: UInt64
-  let engine = AVAudioEngine()
+  let engine: AVAudioEngine
   let player = AVAudioPlayerNode()
   let speed = AVAudioUnitVarispeed()
-  let output: AVAudioOutputNode
-  let mixer: AVAudioMixerNode
+  private var cachedOutput: AVAudioOutputNode?
+  private var cachedMixer: AVAudioMixerNode?
+  var output: AVAudioOutputNode { cachedOutput! }
+  var mixer: AVAudioMixerNode { cachedMixer! }
   let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
   private var getterStats = SenderDiagnostics()
   private var slowReads = [[String: Any]]()
   private static let log = OSLog(subsystem: "dev.silentdisco.audio", category: "Latency")
 
-  init(epoch: UInt64) throws {
+  init(epoch: UInt64, engine: AVAudioEngine = AVAudioEngine()) throws {
     self.epoch = epoch
-    output = engine.outputNode
-    mixer = engine.mainMixerNode
+    self.engine = engine
+    cachedOutput = engine.outputNode
+    cachedMixer = engine.mainMixerNode
     engine.attach(player); engine.attach(speed)
     engine.connect(player, to: speed, format: format)
     engine.connect(speed, to: mixer, format: format)
@@ -113,4 +116,13 @@ final class PlaybackGraph {
     return value
   }
   func stop() { player.stop(); engine.stop() }
+  deinit {
+    // The output clock removes an observer from the engine's I/O unit on release.
+    // Drop our engine-owned node references while that unit is still alive, rather
+    // than relying on the order Swift destroys stored properties. Keep getters
+    // cached so scheduler timestamp reads do not perform engine node lookups.
+    cachedOutput = nil
+    cachedMixer = nil
+    withExtendedLifetime(engine) {}
+  }
 }
