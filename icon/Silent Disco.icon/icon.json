@@ -1,0 +1,68 @@
+{
+  "fill-specializations" : [
+    {
+      "value" : {
+        "automatic-gradient" : "srgb:0.06667,0.07451,0.14902,1.00000"
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : "system-dark"
+    }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "ear-cup-left.svg",
+          "name" : "ear-cup-left"
+        },
+        {
+          "image-name" : "ear-cup-right.svg",
+          "name" : "ear-cup-right"
+        },
+        {
+          "image-name" : "headband.svg",
+          "name" : "headband"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "bar-center 2.svg",
+          "name" : "bar-center 2"
+        },
+        {
+          "image-name" : "bar-left 2.svg",
+          "name" : "bar-left 2"
+        },
+        {
+          "image-name" : "bar-right 2.svg",
+          "name" : "bar-right 2"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "iOS"
+    ]
+  }
+}
